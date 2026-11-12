@@ -38,7 +38,7 @@
         user: 'Aramegab',
         repo: 'api-tools',
         branch: 'main',
-        scriptPath: 'api-tools.js'
+        scriptPath: 'api-tools.user.js'
     };
     const UPDATE_CACHE_KEY = '__netLogger.updateCache';
     const UPDATE_CACHE_TTL = 60 * 60 * 1000;
