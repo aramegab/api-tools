@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         API Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.0.1
 // @description  API Tools - Логирование всех fetch/XHR запросов на сайте: методы, URL, статусы, время, тела запросов/ответов, копирование в cURL/fetch, подмена URL/заголовков/тела, мок-ответы, исключения сайтов.
 // @author       Aramegab
 // @license      PolyForm-Noncommercial-1.0.0
@@ -31,8 +31,10 @@
     const PRETTY_KEY = '__netLogger.prettyPrint';
     const SLOW_KEY = '__netLogger.slowThreshold';
     const DEBUG_KEY = '__netLogger.debug';
+    const AUTO_OPEN_KEY = '__netLogger.autoOpen';
+    const SHOW_ERRORS_KEY = '__netLogger.showErrorsOnly';
 
-    const SCRIPT_VERSION = '1.0.0';
+    const SCRIPT_VERSION = '1.0.1';
 
     const UPDATE_REPO = {
         user: 'Aramegab',
@@ -164,6 +166,10 @@
     function saveSlowThreshold(n) { saveNum(SLOW_KEY, n); }
     function loadDebug() { return loadBool(DEBUG_KEY, false); }
     function saveDebug(v) { saveBool(DEBUG_KEY, v); }
+    function loadAutoOpenViewer() { return loadBool(AUTO_OPEN_KEY, false); }
+    function saveAutoOpenViewer(v) { saveBool(AUTO_OPEN_KEY, v); }
+    function loadShowErrorsOnly() { return loadBool(SHOW_ERRORS_KEY, false); }
+    function saveShowErrorsOnly(v) { saveBool(SHOW_ERRORS_KEY, v); }
 
     function parseVersion(str) {
         return String(str || '0').replace(/^v/i, '').trim()
@@ -260,14 +266,16 @@
         let mocked = null;
         for (const rule of matched) {
             if (rule.newUrl) url = rule.newUrl;
-            if (rule.newHeaders) {
+            if (rule.replaceHeaders === true || rule.newHeaders) {
                 const parsed = parseHeaderLines(rule.newHeaders);
-                const map = new Map(headers.map(([n, v]) => [n.toLowerCase(), [n, v]]));
+                const map = new Map((rule.replaceHeaders === true ? [] : headers).map(([n, v]) => [n.toLowerCase(), [n, v]]));
                 parsed.forEach(([n, v]) => map.set(n.toLowerCase(), [n, v]));
                 headers = [...map.values()];
             }
-            if (rule.newBody !== '' && rule.newBody !== undefined && rule.newBody !== null) {
-                if (rule.bodyMode === 'json-merge' && hasBody) {
+            if (rule.clearBody === true || (rule.newBody !== '' && rule.newBody !== undefined && rule.newBody !== null)) {
+                if (rule.clearBody === true) {
+                    body = '';
+                } else if (rule.bodyMode === 'json-merge' && hasBody) {
                     try {
                         const orig = typeof body === 'string' ? JSON.parse(body) : body;
                         const add = JSON.parse(rule.newBody);
@@ -396,13 +404,13 @@
             }
             .nl-modal--sm { width: min(760px, 100%); height: auto; max-height: min(85vh, 800px); }
             .nl-modal-header {
-                display: flex; align-items: center; gap: 12px;
+                position: relative; display: flex; align-items: center; gap: 12px;
                 padding: 12px 16px; border-bottom: 1px solid var(--nl-border);
                 background: var(--nl-bg2);
             }
             .nl-modal-title { font-weight: 700; font-size: 14px; display: inline-flex; align-items: center; gap: 8px; }
             .nl-modal-title span { color: var(--nl-accent); font-weight: 600; }
-            .nl-modal-tools { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+            .nl-modal-tools { margin-left: auto; padding-right: 40px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
             .nl-input {
                 background: var(--nl-bg); border: 1px solid var(--nl-border);
                 color: var(--nl-text); padding: 8px 10px; border-radius: 8px;
@@ -410,11 +418,12 @@
             }
             .nl-input:focus { border-color: var(--nl-accent); }
             .nl-input--search {
-                padding: 8px 10px 8px 32px; min-width: 240px;
+                padding: 8px 10px 8px 32px; min-width: 180px; max-width: 340px; flex: 1 1 220px;
                 background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239aa0a6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/></svg>");
                 background-repeat: no-repeat; background-position: 10px center;
             }
             .nl-close {
+                position: absolute; top: 12px; right: 16px; z-index: 1;
                 width: 32px; height: 32px; border-radius: 8px;
                 border: 1px solid var(--nl-border); background: var(--nl-bg);
                 color: var(--nl-text); cursor: pointer;
@@ -1124,6 +1133,9 @@
         }
         if (window.__netLoggerUI && window.__netLoggerUI.refresh) window.__netLoggerUI.refresh();
         if (window.__netLoggerBar && window.__netLoggerBar.refresh) window.__netLoggerBar.refresh();
+        if (loadAutoOpenViewer() && window.__netLoggerUI && typeof window.__netLoggerUI.open === 'function' && !window.__netLoggerUI.isOpen()) {
+            window.__netLoggerUI.open();
+        }
     }
 
     function computeXhrResponse(responseType, text) {
@@ -1906,7 +1918,8 @@
         closeBtn.type = 'button';
         closeBtn.title = 'Закрыть (Esc)';
         closeBtn.innerHTML = ICONS.x;
-        tools.appendChild(closeBtn);
+        header.appendChild(tools);
+        header.appendChild(closeBtn);
         modal.appendChild(header);
         return { modal, header, tools, closeBtn };
     }
@@ -2279,7 +2292,31 @@
             checked: loadDebug(),
             onChange: (v) => saveDebug(v)
         }));
+        behaviorCard.appendChild(makeSwitch({
+            label: 'Автоматически открывать просмотр',
+            desc: 'Когда на странице появляется первый запрос, окно просмотра открывается автоматически.',
+            checked: loadAutoOpenViewer(),
+            onChange: (v) => {
+                saveAutoOpenViewer(v);
+                showToast(v ? 'Автооткрытие включено' : 'Автооткрытие выключено');
+            }
+        }));
         root.appendChild(behaviorCard);
+
+        const extraCard = makeCard('Дополнительно', 'settings');
+        extraCard.appendChild(makeSwitch({
+            label: 'Показывать только ошибки в просмотре',
+            desc: 'По умолчанию отображаются только запросы с HTTP-ошибками и исключения.',
+            checked: loadShowErrorsOnly(),
+            onChange: (v) => {
+                saveShowErrorsOnly(v);
+                if (window.__netLoggerUI && typeof window.__netLoggerUI.setShowErrorsOnly === 'function') {
+                    window.__netLoggerUI.setShowErrorsOnly(v);
+                }
+                showToast(v ? 'Режим ошибок включён' : 'Режим ошибок выключен');
+            }
+        }));
+        root.appendChild(extraCard);
     }
 
     function buildRulesPanel(root) {
@@ -2422,7 +2459,9 @@
                 method: rule.method || 'ANY',
                 newUrl: rule.newUrl || '',
                 newHeaders: rule.newHeaders || '',
+                replaceHeaders: !!rule.replaceHeaders,
                 newBody: rule.newBody || '',
+                clearBody: !!rule.clearBody,
                 bodyMode: rule.bodyMode || 'raw',
                 mockStatus: rule.mockStatus || '',
                 mockHeaders: rule.mockHeaders || '',
@@ -2446,8 +2485,8 @@
 
             const summaryParts = [];
             if (rule.newUrl) summaryParts.push('URL');
-            if (rule.newHeaders) summaryParts.push('HDR');
-            if (rule.newBody) summaryParts.push('BODY');
+            if (rule.newHeaders || rule.replaceHeaders) summaryParts.push('HDR');
+            if (rule.newBody || rule.clearBody) summaryParts.push('BODY');
             if (rule.mockStatus) summaryParts.push('MOCK ' + rule.mockStatus);
             if (summaryParts.length) {
                 const sum = document.createElement('span');
@@ -2550,6 +2589,12 @@
             const headersTa = textareaEl(working.newHeaders, 'Authorization: Bearer xxx\nX-Custom: value');
             headersTa.addEventListener('input', () => { working.newHeaders = headersTa.value; });
             secReq.appendChild(field('Новые заголовки (Name: value, по одному в строке)', headersTa));
+            secReq.appendChild(makeSwitch({
+                label: 'Заменить весь набор заголовков',
+                desc: 'Заголовки, которых нет в списке, будут удалены.',
+                checked: working.replaceHeaders,
+                onChange: (v) => { working.replaceHeaders = v; }
+            }));
 
             const bodyRow = document.createElement('div');
             bodyRow.className = 'nl-rule-row';
@@ -2562,8 +2607,26 @@
             secReq.appendChild(bodyRow);
 
             const bodyTa = textareaEl(working.newBody, '{"key":"value"} или произвольная строка');
-            bodyTa.addEventListener('input', () => { working.newBody = bodyTa.value; });
+            bodyTa.addEventListener('input', () => {
+                working.newBody = bodyTa.value;
+                working.clearBody = false;
+                clearBodySwitch.querySelector('input').checked = false;
+            });
             secReq.appendChild(field('Новое тело', bodyTa));
+            const clearBodySwitch = makeSwitch({
+                label: 'Отправлять пустое тело',
+                checked: working.clearBody,
+                onChange: (v) => {
+                    working.clearBody = v;
+                    if (v) {
+                        working.newBody = '';
+                        bodyTa.value = '';
+                    }
+                    bodyTa.disabled = v;
+                }
+            });
+            bodyTa.disabled = working.clearBody;
+            secReq.appendChild(clearBodySwitch);
             editor.appendChild(secReq);
 
             const secRes = document.createElement('div');
@@ -2822,7 +2885,7 @@
                 if (!confirm('Сбросить все настройки API Tools?')) return;
                 [EXCLUDE_KEY, THEME_KEY, MAXBODY_KEY, MAXLOGS_KEY, CONSOLE_KEY,
                  RULES_KEY, APPLY_KEY, COMPACT_KEY, BADGES_KEY, AUTOSCROLL_KEY,
-                 PRETTY_KEY, SLOW_KEY, DEBUG_KEY, UPDATE_CACHE_KEY].forEach(k => {
+                 PRETTY_KEY, SLOW_KEY, DEBUG_KEY, AUTO_OPEN_KEY, SHOW_ERRORS_KEY, UPDATE_CACHE_KEY].forEach(k => {
                     try { localStorage.removeItem(k); } catch (_) {}
                 });
                 _rulesCache = null;
@@ -2928,8 +2991,16 @@
         let searchInput = null;
         let body = null;
         let currentFilter = '';
+        let showOnlyErrors = loadShowErrorsOnly();
         const openRows = new Set();
         const revealedAuth = new Set();
+
+        function setShowErrorsOnly(next) {
+            const value = !!next;
+            showOnlyErrors = value;
+            saveShowErrorsOnly(value);
+            if (body) render();
+        }
 
         function render() {
             if (!body) return;
@@ -2937,8 +3008,9 @@
             const wasAtBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 50;
 
             const q = currentFilter.trim().toLowerCase();
+            const baseLogs = showOnlyErrors ? logs.filter(r => !!r.error || (typeof r.status === 'number' && r.status >= 400)) : logs;
             const filtered = q
-                ? logs.filter(r => {
+                ? baseLogs.filter(r => {
                     const hay = [
                         r.url, r.method, r.status,
                         formatResponse(r.response),
@@ -2949,7 +3021,7 @@
                     ].join('\n').toLowerCase();
                     return hay.includes(q);
                 })
-                : logs;
+                : baseLogs;
 
             if (!filtered.length) {
                 body.innerHTML = `<div class="nl-empty">${
@@ -2999,6 +3071,7 @@
 
                 const toolbar = `
                     <div class="nl-row-toolbar">
+                        <button type="button" class="nl-copy-btn" data-edit="${idxParam}">${ICONS.edit}<span>Редактировать запрос</span></button>
                         <button type="button" class="nl-copy-btn" data-copy="url" data-idx="${idxParam}">${ICONS.clipboard}<span>URL</span></button>
                         ${hasBody ? `<button type="button" class="nl-copy-btn" data-copy="body" data-idx="${idxParam}">${ICONS.clipboard}<span>Body</span></button>` : ''}
                         <button type="button" class="nl-copy-btn" data-copy="curl" data-idx="${idxParam}">${ICONS.clipboard}<span>cURL</span></button>
@@ -3118,6 +3191,168 @@
             }
         }
 
+        function openEditRule(record) {
+            const editorOverlay = buildOverlay();
+            const built = buildModal({
+                titleIcon: 'settings',
+                titleText: 'Редактирование запроса',
+                titleAccent: record.method || 'ANY'
+            });
+            const { modal, closeBtn } = built;
+            const editorBody = document.createElement('div');
+            editorBody.className = 'nl-modal-body';
+            const form = document.createElement('div');
+            form.style.display = 'flex';
+            form.style.flexDirection = 'column';
+            form.style.gap = '12px';
+            const target = document.createElement('div');
+            target.className = 'nl-settings-desc';
+            target.style.margin = '0';
+            target.textContent = String(record.url || '');
+            form.appendChild(target);
+
+            const requestHeadersSwitch = makeSwitch({
+                label: 'Применить заголовки запроса',
+                desc: 'Значения существующих заголовков будут обновлены, новые добавлены.',
+                checked: true,
+                onChange: () => {}
+            });
+            const requestHeadersInput = document.createElement('textarea');
+            requestHeadersInput.className = 'nl-rule-textarea';
+            requestHeadersInput.value = (record.requestHeaders || []).map(([name, value]) => `${name}: ${value}`).join('\n');
+            const requestHeadersField = makeField({ label: 'Заголовки запроса', hint: 'Один заголовок на строку: Name: value' });
+            requestHeadersField.inline.appendChild(requestHeadersInput);
+            form.appendChild(requestHeadersSwitch);
+            form.appendChild(requestHeadersField);
+
+            const requestBodySwitch = makeSwitch({
+                label: 'Применить тело запроса',
+                checked: record.requestBody !== null && record.requestBody !== undefined,
+                onChange: () => {}
+            });
+            const requestBodyInput = document.createElement('textarea');
+            requestBodyInput.className = 'nl-rule-textarea';
+            requestBodyInput.value = formatBody(record.requestBody);
+            const requestBodyField = makeField({ label: 'Тело запроса', hint: 'Будет заменять тело в последующих совпадающих запросах.' });
+            requestBodyField.inline.appendChild(requestBodyInput);
+            form.appendChild(requestBodySwitch);
+            form.appendChild(requestBodyField);
+
+            const responseSwitch = makeSwitch({
+                label: 'Подменять ответ',
+                desc: 'Создаст mock-правило для последующих совпадающих запросов.',
+                checked: false,
+                onChange: () => {}
+            });
+            const responseStatusInput = document.createElement('input');
+            responseStatusInput.className = 'nl-rule-input';
+            responseStatusInput.type = 'number';
+            responseStatusInput.min = '200';
+            responseStatusInput.max = '599';
+            responseStatusInput.value = String(record.status || 200);
+            const responseStatusField = makeField({ label: 'Статус ответа' });
+            responseStatusField.inline.appendChild(responseStatusInput);
+
+            const responseHeadersInput = document.createElement('textarea');
+            responseHeadersInput.className = 'nl-rule-textarea';
+            responseHeadersInput.value = (record.responseHeaders || []).map(([name, value]) => `${name}: ${value}`).join('\n');
+            const responseHeadersField = makeField({ label: 'Заголовки ответа', hint: 'Один заголовок на строку: Name: value' });
+            responseHeadersField.inline.appendChild(responseHeadersInput);
+
+            const responseBodyInput = document.createElement('textarea');
+            responseBodyInput.className = 'nl-rule-textarea';
+            responseBodyInput.value = formatResponse(record.response);
+            const responseBodyField = makeField({ label: 'Тело ответа' });
+            responseBodyField.inline.appendChild(responseBodyInput);
+
+            form.appendChild(responseSwitch);
+            form.appendChild(responseStatusField);
+            form.appendChild(responseHeadersField);
+            form.appendChild(responseBodyField);
+
+            const actions = document.createElement('div');
+            actions.className = 'nl-rule-actions';
+            const closeEditor = () => {
+                document.removeEventListener('keydown', onEditorKey, true);
+                editorOverlay.remove();
+            };
+            const onEditorKey = (event) => {
+                if (event.key === 'Escape') {
+                    event.stopImmediatePropagation();
+                    closeEditor();
+                }
+            };
+            const headerInputEnabled = () => requestHeadersSwitch.querySelector('input').checked;
+            const bodyInputEnabled = () => requestBodySwitch.querySelector('input').checked;
+            const responseInputEnabled = () => responseSwitch.querySelector('input').checked;
+
+            actions.appendChild(makeButton({
+                text: 'Сохранить правило', iconName: 'check', variant: 'primary', size: 'sm',
+                onClick: () => {
+                    const editHeaders = headerInputEnabled();
+                    const editBody = bodyInputEnabled();
+                    const mockResponse = responseInputEnabled();
+                    if (!editHeaders && !editBody && !mockResponse) {
+                        showToast('Выберите, что нужно изменить');
+                        return;
+                    }
+                    if (!String(record.url || '').trim()) {
+                        showToast('У запроса отсутствует URL');
+                        return;
+                    }
+                    const headerValues = [editHeaders ? requestHeadersInput.value : '', mockResponse ? responseHeadersInput.value : ''];
+                    if (headerValues.some(value => value.split(/\r?\n/).some(line => {
+                        const colon = line.indexOf(':');
+                        return line.trim() && (colon <= 0 || !line.slice(0, colon).trim());
+                    }))) {
+                        showToast('Проверьте формат заголовков: Name: value');
+                        return;
+                    }
+                    const status = parseInt(responseStatusInput.value, 10);
+                    if (mockResponse && (!Number.isFinite(status) || status < 200 || status > 599)) {
+                        showToast('Статус ответа должен быть от 200 до 599');
+                        return;
+                    }
+                    const rule = {
+                        id: newRuleId(),
+                        enabled: true,
+                        matchType: 'substring',
+                        match: String(record.url || ''),
+                        method: String(record.method || 'ANY').toUpperCase(),
+                        newUrl: '',
+                        newHeaders: editHeaders ? requestHeadersInput.value : '',
+                        replaceHeaders: editHeaders,
+                        newBody: editBody ? requestBodyInput.value : '',
+                        clearBody: editBody && requestBodyInput.value === '',
+                        bodyMode: 'raw',
+                        mockStatus: mockResponse ? String(status) : '',
+                        mockHeaders: mockResponse ? responseHeadersInput.value : '',
+                        mockBody: mockResponse ? responseBodyInput.value : ''
+                    };
+                    const rules = loadRules();
+                    rules.push(rule);
+                    saveRules(rules);
+                    if (!loadApplyRules()) saveApplyRules(true);
+                    closeEditor();
+                    showToast('Правило сохранено. Оно применяется к следующим совпадающим запросам.');
+                }
+            }));
+            actions.appendChild(makeButton({
+                text: 'Отмена', size: 'sm',
+                onClick: closeEditor
+            }));
+            form.appendChild(actions);
+            editorBody.appendChild(form);
+            modal.appendChild(editorBody);
+            editorOverlay.appendChild(modal);
+            editorOverlay.addEventListener('click', event => {
+                if (event.target === editorOverlay) closeEditor();
+            });
+            closeBtn.addEventListener('click', closeEditor);
+            document.addEventListener('keydown', onEditorKey, true);
+            document.body.appendChild(editorOverlay);
+        }
+
         function open() {
             if (overlay) return;
             injectStyles();
@@ -3139,7 +3374,36 @@
                 currentFilter = searchInput.value;
                 render();
             });
+
             tools.appendChild(searchInput);
+
+            const toggleErrorsBtn = makeButton({
+                text: showOnlyErrors ? 'Ошибки: on' : 'Ошибки', iconName: 'info', variant: showOnlyErrors ? 'danger' : '',
+                onClick: () => {
+                    setShowErrorsOnly(!showOnlyErrors);
+                    const label = toggleErrorsBtn.querySelector('span');
+                    if (label) label.textContent = showOnlyErrors ? 'Ошибки: on' : 'Ошибки';
+                    toggleErrorsBtn.classList.toggle('nl-btn--danger', showOnlyErrors);
+                    render();
+                }
+            });
+            tools.appendChild(toggleErrorsBtn);
+
+            tools.appendChild(makeButton({
+                text: 'Развернуть все запросы', iconName: 'chevronDown',
+                onClick: () => {
+                    const all = logs.map((r) => getRowKey(r));
+                    all.forEach(k => openRows.add(k));
+                    render();
+                }
+            }));
+            tools.appendChild(makeButton({
+                text: 'Свернуть все запросы', iconName: 'chevronRight',
+                onClick: () => {
+                    openRows.clear();
+                    render();
+                }
+            }));
             tools.appendChild(makeButton({
                 text: 'Скачать', iconName: 'download', variant: 'primary',
                 onClick: () => {
@@ -3164,11 +3428,17 @@
                     render();
                 }
             }));
-
             body = document.createElement('div');
             body.className = 'nl-modal-body';
             body.addEventListener('click', async (e) => {
                 if (e.target.closest('.nl-eye')) return;
+                const editBtn = e.target.closest('[data-edit]');
+                if (editBtn) {
+                    e.stopPropagation();
+                    const record = logs[parseInt(editBtn.dataset.edit, 10)];
+                    if (record) openEditRule(record);
+                    return;
+                }
                 const copyBtn = e.target.closest('.nl-copy-btn');
                 if (copyBtn) {
                     e.stopPropagation();
@@ -3212,7 +3482,7 @@
             searchInput = null;
         }
 
-        return { open, close, refresh: render, isOpen: () => !!overlay };
+        return { open, close, refresh: render, setShowErrorsOnly, isOpen: () => !!overlay };
     }
 
     function createUI() {
