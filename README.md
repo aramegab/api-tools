@@ -120,7 +120,7 @@ Tampermonkey - это менеджер userscripts, который позвол�
 
 1. Откройте иконку **Tampermonkey** в панели браузера → **Create a new script**
 2. Удалите весь шаблонный код
-3. Вставьте содержимое файла [`api-tools.js`](api-tools.user.js)
+3. Вставьте содержимое файла [`api-tools.user.js`](api-tools.user.js)
 4. Сохраните: **Ctrl+S** (или **Cmd+S** на macOS)
 5. Обновите страницу любого сайта - скрипт активируется
 
