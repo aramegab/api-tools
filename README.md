@@ -4,7 +4,7 @@
 
 **Перехват, просмотр и подмена fetch/XHR запросов в браузере**
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue?style=for-the-badge)](https://github.com/Aramegab/api-tools/releases)
+[![Version](https://img.shields.io/badge/version-1.0.1-blue?style=for-the-badge)](https://github.com/Aramegab/api-tools/releases)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-red?style=for-the-badge)](LICENSE)
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-Userscript-black?style=for-the-badge&logo=tampermonkey)](https://raw.githubusercontent.com/Aramegab/api-tools/main/api-tools.user.js)
 
