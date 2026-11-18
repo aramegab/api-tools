@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         API Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
-// @description  API Tools - Логирование всех fetch/XHR запросов на сайте: методы, URL, статусы, время, тела запросов/ответов, копирование в cURL/fetch, подмена URL/заголовков/тела, мок-ответы, исключения сайтов.
+// @version      1.0.2
+// @description  API Tools - Логирование fetch/XHR, WebSocket, EventSource и sendBeacon: тела, размеры, время, query, инициаторы, правила подмены и mock-ответы.
 // @author       Aramegab
 // @license      PolyForm-Noncommercial-1.0.0
 // @copyright    2026 Aramegab
@@ -24,6 +24,7 @@
     const MAXLOGS_KEY = '__netLogger.maxLogs';
     const CONSOLE_KEY = '__netLogger.consoleLogs';
     const RULES_KEY = '__netLogger.rules';
+    const IGNORE_RULES_KEY = '__netLogger.ignoreRules';
     const APPLY_KEY = '__netLogger.applyRules';
     const COMPACT_KEY = '__netLogger.compact';
     const BADGES_KEY = '__netLogger.showBadges';
@@ -33,8 +34,19 @@
     const DEBUG_KEY = '__netLogger.debug';
     const AUTO_OPEN_KEY = '__netLogger.autoOpen';
     const SHOW_ERRORS_KEY = '__netLogger.showErrorsOnly';
+    const FAB_POSITION_KEY = '__netLogger.fabPosition';
+    const LOG_LIMIT_ENABLED_KEY = '__netLogger.logLimitEnabled';
+    const LOG_PERSISTENCE_KEY = '__netLogger.logPersistence';
+    const LOG_PERSISTENCE_MB_KEY = '__netLogger.logPersistenceMb';
+    const LOG_MAX_AGE_ENABLED_KEY = '__netLogger.logMaxAgeEnabled';
+    const LOG_MAX_AGE_MINUTES_KEY = '__netLogger.logMaxAgeMinutes';
+    const LOG_MAX_SIZE_ENABLED_KEY = '__netLogger.logMaxSizeEnabled';
+    const LOG_MAX_SIZE_MB_KEY = '__netLogger.logMaxSizeMb';
+    const LOG_IO_ENABLED_KEY = '__netLogger.logIoEnabled';
+    const LOG_IMPORT_MAX_MB_KEY = '__netLogger.logImportMaxMb';
+    const SESSION_LOGS_KEY = '__netLogger.sessionLogs';
 
-    const SCRIPT_VERSION = '1.0.1';
+    const SCRIPT_VERSION = '1.0.2';
 
     const UPDATE_REPO = {
         user: 'Aramegab',
@@ -124,7 +136,41 @@
         } catch (_) { return 1000; }
     }
     function saveMaxLogs(n) {
-        try { localStorage.setItem(MAXLOGS_KEY, String(n)); } catch (_) {}
+        return saveLogConfig(MAXLOGS_KEY, n);
+    }
+    function loadConfiguredNum(key, fallback, min, max) {
+        try {
+            const value = Number(localStorage.getItem(key));
+            return Number.isFinite(value) && value >= min && value <= max ? value : fallback;
+        } catch (_) { return fallback; }
+    }
+    function loadConfiguredNumInput(key, min, max) {
+        try {
+            const raw = localStorage.getItem(key);
+            if (raw === null || raw.trim() === '') return '';
+            const value = Number(raw);
+            return Number.isFinite(value) && value >= min && value <= max ? String(value) : '';
+        } catch (_) { return ''; }
+    }
+    function saveLogConfig(key, value) {
+        try {
+            localStorage.setItem(key, String(value));
+            return true;
+        } catch (error) {
+            console.warn('[API Tools] Не удалось сохранить настройку логов:', error);
+            if (document.body) showToast('Не удалось сохранить настройку: ' + String(error));
+            return false;
+        }
+    }
+    function clearPersistedLogs() {
+        try {
+            sessionStorage.removeItem(SESSION_LOGS_KEY);
+            return true;
+        } catch (error) {
+            console.warn('[API Tools] Не удалось удалить сохранённые логи:', error);
+            if (document.body) showToast('Не удалось удалить сохранённые логи: ' + String(error));
+            return false;
+        }
     }
     function loadConsoleLogs() {
         try {
@@ -170,6 +216,15 @@
     function saveAutoOpenViewer(v) { saveBool(AUTO_OPEN_KEY, v); }
     function loadShowErrorsOnly() { return loadBool(SHOW_ERRORS_KEY, false); }
     function saveShowErrorsOnly(v) { saveBool(SHOW_ERRORS_KEY, v); }
+    function loadFabPosition() {
+        try {
+            const value = localStorage.getItem(FAB_POSITION_KEY);
+            return ['bottom-right', 'bottom-left', 'top-right', 'top-left'].includes(value) ? value : 'bottom-right';
+        } catch (_) { return 'bottom-right'; }
+    }
+    function saveFabPosition(value) {
+        try { localStorage.setItem(FAB_POSITION_KEY, value); } catch (_) {}
+    }
 
     function parseVersion(str) {
         return String(str || '0').replace(/^v/i, '').trim()
@@ -221,6 +276,26 @@
     function newRuleId() {
         return 'r_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7);
     }
+    function loadIgnoreRules() {
+        try {
+            const raw = localStorage.getItem(IGNORE_RULES_KEY);
+            const rules = raw ? JSON.parse(raw) : [];
+            return Array.isArray(rules) ? rules : [];
+        } catch (error) {
+            console.warn('[API Tools] Не удалось загрузить правила игнорирования:', error);
+            return [];
+        }
+    }
+    function saveIgnoreRules(rules) {
+        try {
+            localStorage.setItem(IGNORE_RULES_KEY, JSON.stringify(rules));
+            return true;
+        } catch (error) {
+            console.warn('[API Tools] Не удалось сохранить правила игнорирования:', error);
+            showToast('Не удалось сохранить правило: ' + String(error));
+            return false;
+        }
+    }
     function parseHeaderLines(text) {
         const pairs = [];
         if (!text) return pairs;
@@ -235,24 +310,85 @@
         pairs.forEach(([n, v]) => { obj[n] = v; });
         return obj;
     }
-    function ruleMatches(rule, url, method) {
-        if (!rule || !rule.enabled) return false;
-        if (rule.method && rule.method !== 'ANY' && rule.method !== method) return false;
-        const pattern = rule.match || '';
-        if (!pattern) return false;
-        if (rule.matchType === 'regex') {
-            try { return new RegExp(pattern).test(url); } catch (_) { return false; }
+    function matchesPattern(value, pattern, matchType) {
+        if (matchType === 'regex') {
+            try { return new RegExp(pattern).test(value); } catch (_) { return false; }
         }
-        if (rule.matchType === 'glob') {
+        if (matchType === 'glob') {
             try {
                 const re = new RegExp('^' + pattern
                     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
                     .replace(/\*/g, '.*')
                     .replace(/\?/g, '.') + '$');
-                return re.test(url);
+                return re.test(value);
             } catch (_) { return false; }
         }
-        return url.indexOf(pattern) !== -1;
+        return value.indexOf(pattern) !== -1;
+    }
+    function ruleMatches(rule, url, method) {
+        if (!rule || !rule.enabled) return false;
+        if (rule.method && rule.method !== 'ANY' && rule.method !== method) return false;
+        const pattern = rule.match || '';
+        if (!pattern) return false;
+        return matchesPattern(url, pattern, rule.matchType);
+    }
+    function ignoreRuleMatches(rule, entry) {
+        if (!rule || !rule.enabled) return false;
+        const urlPattern = String(rule.urlPattern || '').trim();
+        const method = String(rule.method || '').trim().toUpperCase();
+        const hostPattern = String(rule.host || '').trim().toLowerCase();
+        if (!urlPattern && (!method || method === 'ANY') && !hostPattern) return false;
+        if (urlPattern && !matchesPattern(String(entry.url || ''), urlPattern, rule.urlMatchType)) return false;
+        if (method && method !== 'ANY' && method !== String(entry.method || '').trim().toUpperCase()) return false;
+        if (hostPattern) {
+            let hostname = '';
+            try { hostname = new URL(String(entry.url || ''), location.href).hostname.toLowerCase(); } catch (_) {}
+            const wildcard = hostPattern.startsWith('*.');
+            const expected = wildcard ? hostPattern.slice(2) : hostPattern;
+            if (!hostname || (wildcard
+                ? hostname !== expected && !hostname.endsWith('.' + expected)
+                : hostname !== expected)) return false;
+        }
+        return true;
+    }
+    function shouldIgnoreLog(entry) {
+        return loadIgnoreRules().some(rule => ignoreRuleMatches(rule, entry));
+    }
+    function addIgnoreEndpointRule(entry) {
+        let urlPattern = String(entry.url || '');
+        try {
+            const url = new URL(urlPattern, location.href);
+            urlPattern = url.origin + url.pathname;
+        } catch (_) {}
+        if (!urlPattern) {
+            showToast('У записи нет URL');
+            return;
+        }
+        const method = String(entry.method || 'ANY').trim().toUpperCase() || 'ANY';
+        const rules = loadIgnoreRules();
+        const existing = rules.find(rule => rule.urlPattern === urlPattern
+            && (rule.urlMatchType || 'substring') === 'substring'
+            && String(rule.method || 'ANY').toUpperCase() === method
+            && !rule.host);
+        if (existing) {
+            if (!existing.enabled) {
+                existing.enabled = true;
+                if (!saveIgnoreRules(rules)) return;
+            }
+            showToast('Правило уже есть: будущие ' + method + ' для этого endpoint не будут логироваться');
+            return;
+        }
+        rules.push({
+            id: newRuleId(),
+            enabled: true,
+            urlPattern,
+            urlMatchType: 'substring',
+            method,
+            host: ''
+        });
+        if (saveIgnoreRules(rules)) {
+            showToast('Будущие запросы ' + method + ' к endpoint исключены из логов');
+        }
     }
     function matchRules(url, method) {
         if (!loadApplyRules()) return [];
@@ -342,6 +478,14 @@
                 font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
                 color: var(--nl-text);
             }
+            #__netLoggerUI[data-position="bottom-left"],
+            #__netLoggerUI[data-position="top-left"] {
+                right: auto; left: 16px; align-items: flex-start;
+            }
+            #__netLoggerUI[data-position="top-right"],
+            #__netLoggerUI[data-position="top-left"] {
+                top: 16px; bottom: auto; flex-direction: column-reverse;
+            }
             .nl-fab {
                 display: inline-flex; align-items: center; gap: 8px;
                 padding: 10px 14px; border-radius: 999px;
@@ -363,7 +507,18 @@
                 opacity: 0; transform: translateY(6px) scale(.96); pointer-events: none;
                 transition: opacity .16s ease, transform .16s ease; transform-origin: bottom right;
             }
+            #__netLoggerUI[data-position="bottom-left"] .nl-actions { transform-origin: bottom left; }
+            #__netLoggerUI[data-position="top-right"] .nl-actions {
+                transform: translateY(-6px) scale(.96); transform-origin: top right;
+            }
+            #__netLoggerUI[data-position="top-left"] .nl-actions {
+                transform: translateY(-6px) scale(.96); transform-origin: top left;
+            }
             .nl-actions.nl-open { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
+            #__netLoggerUI[data-position="top-right"] .nl-actions.nl-open,
+            #__netLoggerUI[data-position="top-left"] .nl-actions.nl-open {
+                transform: translateY(0) scale(1);
+            }
             .nl-btn {
                 display: inline-flex; align-items: center; gap: 8px;
                 border: 1px solid var(--nl-panel-border);
@@ -376,6 +531,7 @@
             }
             .nl-btn:hover { background: var(--nl-panel-hover); border-color: var(--nl-accent); }
             .nl-btn:active { transform: translateY(1px) scale(.99); }
+            .nl-btn:disabled { opacity: .5; cursor: not-allowed; }
             .nl-btn .nl-ico { width: 16px; height: 16px; }
             .nl-btn--primary { border-color: var(--nl-accent); }
             .nl-btn--primary .nl-ico { color: var(--nl-accent); }
@@ -422,6 +578,16 @@
                 background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239aa0a6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/></svg>");
                 background-repeat: no-repeat; background-position: 10px center;
             }
+            .nl-search-wrap { display: flex; align-items: center; gap: 6px; flex: 1 1 260px; min-width: 220px; }
+            .nl-search-wrap .nl-input--search { min-width: 0; width: 100%; }
+            .nl-search-regex { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--nl-text-dim); font-size: 11px; }
+            .nl-search-regex input, .nl-viewer-slow input { accent-color: var(--nl-accent); }
+            .nl-viewer-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--nl-border); }
+            .nl-filter-select { min-width: 115px; padding: 6px 8px; font-size: 12px; }
+            .nl-viewer-slow { display: inline-flex; align-items: center; gap: 5px; color: var(--nl-text-dim); font-size: 12px; white-space: nowrap; }
+            .nl-search-error { flex: 1 0 100%; min-height: 0; color: var(--nl-danger); font-size: 12px; }
+            .nl-search-error:empty { display: none; }
+            .nl-search-match { color: inherit; background: rgba(255,214,10,.4); border-radius: 2px; padding: 0 1px; }
             .nl-close {
                 position: absolute; top: 12px; right: 16px; z-index: 1;
                 width: 32px; height: 32px; border-radius: 8px;
@@ -557,6 +723,40 @@
             .nl-theme-option.active { border-color: var(--nl-accent); background: var(--nl-bg2); color: var(--nl-accent); }
             .nl-theme-option .nl-ico { width: 22px; height: 22px; }
             .nl-theme-option-label { font-size: 12px; }
+            .nl-position-preview {
+                position: relative; width: min(100%, 340px); height: 180px;
+                border: 1px solid var(--nl-border); border-radius: 12px;
+                overflow: hidden; background: var(--nl-bg);
+                box-shadow: inset 0 0 0 1px rgba(0,0,0,.03);
+            }
+            .nl-position-preview-bar {
+                height: 20px; border-bottom: 1px solid var(--nl-border);
+                background: var(--nl-bg2); display: flex; align-items: center;
+                gap: 4px; padding: 0 8px;
+            }
+            .nl-position-preview-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--nl-border); }
+            .nl-position-preview-line {
+                position: absolute; left: 14px; right: 14px; height: 6px;
+                border-radius: 4px; background: var(--nl-bg3);
+            }
+            .nl-position-preview-line:nth-of-type(2) { top: 42px; right: 30%; }
+            .nl-position-preview-line:nth-of-type(3) { top: 60px; right: 14px; }
+            .nl-position-preview-line:nth-of-type(4) { top: 78px; right: 22%; }
+            .nl-position-option {
+                position: absolute; z-index: 1; width: 30px; height: 30px;
+                display: inline-flex; align-items: center; justify-content: center;
+                padding: 0; border: 1px solid var(--nl-panel-border);
+                border-radius: 999px; background: var(--nl-panel); color: var(--nl-accent);
+                box-shadow: var(--nl-panel-shadow); cursor: pointer;
+                transition: transform .12s ease, border-color .12s ease, background .12s ease;
+            }
+            .nl-position-option:hover { transform: scale(1.12); border-color: var(--nl-accent); }
+            .nl-position-option.active { background: var(--nl-accent); border-color: var(--nl-accent); color: #fff; }
+            .nl-position-option .nl-ico { width: 16px; height: 16px; }
+            .nl-position-option[data-position="top-left"] { top: 7px; left: 7px; }
+            .nl-position-option[data-position="top-right"] { top: 7px; right: 7px; }
+            .nl-position-option[data-position="bottom-left"] { bottom: 7px; left: 7px; }
+            .nl-position-option[data-position="bottom-right"] { bottom: 7px; right: 7px; }
 
             .nl-excl-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
             .nl-excl-item {
@@ -587,7 +787,19 @@
                 margin-bottom: 8px; background: var(--nl-bg2); overflow: hidden;
                 transition: border-color .15s ease;
             }
-            .nl-row:hover { border-color: var(--nl-accent); }
+            .nl-row:hover, .nl-row.compare-selected { border-color: var(--nl-accent); }
+            .nl-pin-btn {
+                flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+                width: 24px; height: 24px; padding: 2px; border: 0; border-radius: 5px;
+                color: var(--nl-text-dim); background: transparent; cursor: pointer;
+            }
+            .nl-pin-btn:hover, .nl-pin-btn.pinned { color: var(--nl-accent); }
+            .nl-pin-btn .nl-ico { width: 17px; height: 17px; }
+            .nl-compare-select { flex: 0 0 auto; width: 15px; height: 15px; margin: 0; accent-color: var(--nl-accent); cursor: pointer; }
+            .nl-group-heading, .nl-pinned-heading {
+                margin: 12px 0 7px; color: var(--nl-text-dim); font-size: 12px; font-weight: 700;
+            }
+            .nl-pinned-heading { color: var(--nl-accent); }
             .nl-row-head {
                 display: flex; align-items: center; gap: 10px;
                 padding: 10px 12px; cursor: pointer; user-select: none;
@@ -619,6 +831,12 @@
                 font-size: 11px; color: var(--nl-text-dim);
                 padding: 2px 6px; border-radius: 6px; border: 1px solid var(--nl-border);
             }
+            .nl-content-type {
+                display: inline-flex; align-items: center; gap: 4px;
+                color: var(--nl-text-dim); font-size: 10px;
+                padding: 2px 6px; border: 1px solid var(--nl-border); border-radius: 6px;
+            }
+            .nl-content-type .nl-ico { width: 12px; height: 12px; }
             .nl-chev {
                 color: var(--nl-text-dim);
                 display: inline-flex; align-items: center; justify-content: center;
@@ -646,7 +864,17 @@
             }
             .nl-copy-btn:hover { background: var(--nl-bg3); border-color: var(--nl-accent); color: var(--nl-accent); }
             .nl-copy-btn.copied { background: var(--nl-success); color: #fff; border-color: transparent; }
+            .nl-copy-btn:disabled { opacity: .5; cursor: not-allowed; }
             .nl-copy-btn .nl-ico { width: 12px; height: 12px; }
+            .nl-diff-section { margin-bottom: 14px; }
+            .nl-diff-title { color: var(--nl-text-dim); font-size: 11px; font-weight: 700; text-transform: uppercase; margin-bottom: 5px; }
+            .nl-diff-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+            .nl-diff-side { min-width: 0; padding: 8px; border: 1px solid var(--nl-border); border-radius: 7px; background: var(--nl-bg2); }
+            .nl-diff-side.changed { border-color: var(--nl-danger); background: rgba(255,80,80,.12); }
+            .nl-diff-side pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+            .nl-diff-table { width: 100%; border-collapse: collapse; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+            .nl-diff-table th, .nl-diff-table td { padding: 6px; border: 1px solid var(--nl-border); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+            .nl-diff-table tr.changed td { background: rgba(255,80,80,.12); }
             .nl-kv { margin-bottom: 10px; }
             .nl-kv:last-child { margin-bottom: 0; }
             .nl-k {
@@ -679,7 +907,7 @@
             }
             .nl-header-name { color: var(--nl-accent); flex: 0 0 auto; }
             .nl-header-val { flex: 1; min-width: 0; word-break: break-all; }
-            .nl-header-auth .nl-header-val.masked { color: var(--nl-text-dim); letter-spacing: 1px; }
+            .nl-header-sensitive .nl-header-val.masked { color: var(--nl-text-dim); letter-spacing: 1px; }
             .nl-eye {
                 flex: 0 0 auto; background: transparent; border: none; color: var(--nl-text-dim);
                 cursor: pointer; padding: 0 2px; display: inline-flex; align-items: center;
@@ -852,6 +1080,7 @@
                 .nl-input--search { min-width: 120px; }
                 .nl-modal { height: 92vh; }
                 .nl-badge-time span { display: none; }
+                .nl-diff-grid { grid-template-columns: minmax(0, 1fr); }
                 .nl-settings-wrap { flex-direction: column; }
                 .nl-settings-tabs {
                     width: 100%; display: flex; overflow-x: auto;
@@ -959,7 +1188,14 @@
         power: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></svg>`,
         info: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>`,
         check: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`,
+        pause: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>`,
+        play: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>`,
         edit: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>`,
+        star: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg>`,
+        starFilled: `<svg class="nl-ico" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg>`,
+        code: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/><path d="m14 4-4 16"/></svg>`,
+        image: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>`,
+        fileText: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/></svg>`,
         palette: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>`,
         eye2: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>`,
         zap: `<svg class="nl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
@@ -998,14 +1234,105 @@
         return;
     }
 
-    window.__netLogger = { logs: [], disabled: false };
+    window.__netLogger = { logs: [], disabled: false, paused: false };
     const logs = window.__netLogger.logs;
+    const pinnedLogs = new Set();
+    let persistTimer = null;
+    let storageErrorShown = false;
+    let storageWarningShown = false;
 
     function safeJson(text) {
         try { return JSON.parse(text); } catch (_) { return null; }
     }
+    function tryParseJsonValue(text) {
+        try { return JSON.parse(text); } catch (_) { return undefined; }
+    }
     function isAuthorizationHeader(name) {
         return String(name || '').trim().toLowerCase() === 'authorization';
+    }
+    function isCookieHeader(name) {
+        const normalized = String(name || '').trim().toLowerCase();
+        return normalized === 'cookie' || normalized === 'set-cookie' || normalized === 'cookie2' || normalized === 'set-cookie2';
+    }
+    function isSensitiveHeader(name) {
+        return isAuthorizationHeader(name) || isCookieHeader(name);
+    }
+    function captureInitiator() {
+        try {
+            const stack = new Error().stack || '';
+            return stack.split('\n')
+                .filter((line, index) => index > 0
+                    && !/captureInitiator|(?:chrome|moz|edge)-extension:\/\/|userscript\.html/i.test(line))
+                .join('\n')
+                .trim();
+        } catch (_) {
+            return '';
+        }
+    }
+    function byteLength(value) {
+        const text = String(value);
+        if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text).byteLength;
+        if (typeof Blob !== 'undefined') return new Blob([text]).size;
+        return unescape(encodeURIComponent(text)).length;
+    }
+    function measureBodySize(body) {
+        if (body === null || body === undefined) return 0;
+        if (typeof body === 'string') {
+            const binary = body.match(/^\[(?:Blob|Binary):\s*(\d+)\s*bytes/);
+            if (binary) return parseInt(binary[1], 10);
+            if (body === '[ReadableStream]') return null;
+            return byteLength(body);
+        }
+        if (typeof Blob !== 'undefined' && body instanceof Blob) return body.size;
+        if (typeof ArrayBuffer !== 'undefined' && (body instanceof ArrayBuffer || ArrayBuffer.isView(body))) return body.byteLength;
+        if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return byteLength(body.toString());
+        if (typeof FormData !== 'undefined' && body instanceof FormData) return null;
+        if (typeof body === 'object' && (body.__type === 'FormData' || body.__type === 'ReadableStream')) return null;
+        if (typeof body === 'object' && body.__type === 'URLSearchParams' && Array.isArray(body.entries)) {
+            return byteLength(body.entries.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&'));
+        }
+        try { return byteLength(JSON.stringify(body)); } catch (_) { return null; }
+    }
+    function getHeaderValue(headers, name) {
+        if (!Array.isArray(headers)) return '';
+        const found = headers.find(([key]) => String(key).toLowerCase() === name.toLowerCase());
+        return found ? String(found[1]) : '';
+    }
+    function getDeclaredSize(headers) {
+        const value = getHeaderValue(headers, 'content-length');
+        const normalized = value.trim();
+        if (!/^\d+$/.test(normalized)) return null;
+        const size = Number(normalized);
+        return Number.isSafeInteger(size) ? size : null;
+    }
+    function parseQueryParams(url) {
+        try {
+            return [...new URL(String(url || ''), location.href).searchParams.entries()];
+        } catch (_) {
+            return [];
+        }
+    }
+    function formatByteSize(size) {
+        if (!Number.isFinite(size) || size < 0) return 'н/д';
+        if (size < 1024) return size + ' B';
+        if (size < 1024 * 1024) return (size / 1024).toFixed(1) + ' KB';
+        return (size / (1024 * 1024)).toFixed(2) + ' MB';
+    }
+    function getContentTypeInfo(contentType) {
+        const mime = String(contentType || '').split(';')[0].trim().toLowerCase();
+        if (!mime) return { label: 'UNKNOWN', icon: ICONS.info };
+        if (mime === 'application/json' || mime.endsWith('+json')) return { label: 'JSON', icon: ICONS.code };
+        if (mime === 'text/html' || mime === 'application/xhtml+xml') return { label: 'HTML', icon: ICONS.globe };
+        if (mime.startsWith('image/')) return { label: 'IMAGE', icon: ICONS.image };
+        if (mime.startsWith('text/') || /javascript|xml|form-urlencoded/.test(mime)) return { label: 'TEXT', icon: ICONS.fileText };
+        return { label: 'BINARY', icon: ICONS.cpu };
+    }
+    function serializeMessage(data) {
+        if (typeof data === 'string') {
+            const parsed = tryParseJsonValue(data);
+            return parsed !== undefined ? parsed : data.substring(0, loadMaxBody());
+        }
+        return serializeBody(data);
     }
 
     function serializeBody(body) {
@@ -1113,13 +1440,199 @@
         return matched.map(r => ({ id: r.id, match: r.match, method: r.method, mocked: !!r.mockStatus }));
     }
 
+    function replaceLogs(next) {
+        logs.length = 0;
+        next.forEach(record => logs.push(record));
+    }
+
+    function recordSizeBytes(record) {
+        try { return byteLength(JSON.stringify(record)); }
+        catch (error) {
+            console.warn('[API Tools] Не удалось определить размер записи:', error);
+            return 0;
+        }
+    }
+
+    function forgetLogReferences() {
+        const liveLogs = new Set(logs);
+        pinnedLogs.forEach(record => { if (!liveLogs.has(record)) pinnedLogs.delete(record); });
+    }
+
+    function persistLogsSoon() {
+        if (persistTimer !== null) clearTimeout(persistTimer);
+        if (!loadBool(LOG_PERSISTENCE_KEY, false)) return;
+        persistTimer = setTimeout(() => {
+            persistTimer = null;
+            try {
+                const limitBytes = loadConfiguredNum(LOG_PERSISTENCE_MB_KEY, 2, 1, 50) * 1024 * 1024;
+                const entries = logs.map(record => ({ record, pinned: pinnedLogs.has(record) }));
+                const envelope = { version: 1, savedAt: Date.now(), entries };
+                let serialized = JSON.stringify(envelope);
+                while (byteLength(serialized) > limitBytes && entries.length) {
+                    entries.shift();
+                    serialized = JSON.stringify(envelope);
+                }
+                while (true) {
+                    try {
+                        sessionStorage.setItem(SESSION_LOGS_KEY, serialized);
+                        storageErrorShown = false;
+                        break;
+                    } catch (error) {
+                        const quotaError = error && (
+                            error.name === 'QuotaExceededError'
+                            || error.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+                            || error.code === 22
+                            || error.code === 1014
+                        );
+                        if (!quotaError || !entries.length) throw error;
+                        entries.shift();
+                        serialized = JSON.stringify(envelope);
+                    }
+                }
+                if (entries.length < logs.length) {
+                    if (!storageWarningShown) {
+                        storageWarningShown = true;
+                        console.warn('[API Tools] Часть старых логов не помещается в лимит sessionStorage.');
+                        if (document.body) showToast('Не все логи поместились в sessionStorage; сохранены последние записи.');
+                    }
+                } else {
+                    storageWarningShown = false;
+                }
+            } catch (error) {
+                if (!storageErrorShown) {
+                    storageErrorShown = true;
+                    console.warn('[API Tools] Не удалось сохранить логи в sessionStorage:', error);
+                    if (document.body) showToast('Не удалось сохранить логи: ' + String(error));
+                }
+            }
+        }, 250);
+    }
+
+    function restoreSessionLogs() {
+        if (!loadBool(LOG_PERSISTENCE_KEY, false)) return;
+        try {
+            const raw = sessionStorage.getItem(SESSION_LOGS_KEY);
+            if (!raw) return;
+            const snapshot = JSON.parse(raw);
+            if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.entries)) {
+                throw new Error('Неверный формат сохранённых логов');
+            }
+            snapshot.entries.forEach(item => {
+                if (!item || !item.record || typeof item.record !== 'object' || typeof item.record.url !== 'string') return;
+                logs.push(item.record);
+                if (item.pinned) pinnedLogs.add(item.record);
+            });
+            trimLogs();
+        } catch (error) {
+            console.warn('[API Tools] Не удалось восстановить сохранённые логи:', error);
+            try { sessionStorage.removeItem(SESSION_LOGS_KEY); } catch (removeError) {
+                console.warn('[API Tools] Не удалось удалить повреждённые сохранённые логи:', removeError);
+            }
+        }
+    }
+
+    function cleanupLogs() {
+        const previousLength = logs.length;
+        let retained = logs.slice();
+        if (loadBool(LOG_MAX_AGE_ENABLED_KEY, false)) {
+            const maxAgeMs = loadConfiguredNum(LOG_MAX_AGE_MINUTES_KEY, 60, 1, 525600) * 60000;
+            const cutoff = Date.now() - maxAgeMs;
+            retained = retained.filter(record => {
+                const time = Date.parse(record.time || '');
+                return !Number.isFinite(time) || time >= cutoff;
+            });
+        }
+        if (loadBool(LOG_MAX_SIZE_ENABLED_KEY, false)) {
+            const maxBytes = loadConfiguredNum(LOG_MAX_SIZE_MB_KEY, 25, 1, 500) * 1024 * 1024;
+            let totalBytes = retained.reduce((total, record) => total + recordSizeBytes(record), 0);
+            while (totalBytes > maxBytes && retained.length) {
+                let index = retained.findIndex(record => !pinnedLogs.has(record));
+                if (index < 0) index = 0;
+                totalBytes -= recordSizeBytes(retained[index]);
+                retained.splice(index, 1);
+            }
+        }
+        if (retained.length !== logs.length) replaceLogs(retained);
+        forgetLogReferences();
+        return logs.length !== previousLength;
+    }
+
     function trimLogs() {
-        const max = loadMaxLogs();
-        if (logs.length > max) logs.splice(0, logs.length - max);
+        if (loadBool(LOG_LIMIT_ENABLED_KEY, true)) {
+            const max = loadMaxLogs();
+            if (logs.length > max) {
+                const pinned = logs.filter(entry => pinnedLogs.has(entry));
+                const unpinned = logs.filter(entry => !pinnedLogs.has(entry));
+                const keepCount = Math.max(0, max - pinned.length);
+                const recentUnpinned = keepCount ? new Set(unpinned.slice(-keepCount)) : new Set();
+                replaceLogs(logs.filter(entry => pinnedLogs.has(entry) || recentUnpinned.has(entry)));
+            }
+        }
+        cleanupLogs();
+        persistLogsSoon();
+    }
+
+    function updatePauseButtons() {
+        const paused = !!window.__netLogger.paused;
+        document.querySelectorAll('[data-netlogger-pause]').forEach(button => {
+            button.innerHTML = (paused ? ICONS.play : ICONS.pause) + `<span>${paused ? 'Возобновить' : 'Пауза'}</span>`;
+            button.title = paused ? 'Возобновить логирование' : 'Приостановить логирование';
+            button.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        });
+    }
+
+    function setLoggingPaused(paused) {
+        window.__netLogger.paused = !!paused;
+        updatePauseButtons();
+        if (window.__netLoggerUI && window.__netLoggerUI.refresh) window.__netLoggerUI.refresh();
+        showToast(window.__netLogger.paused ? 'Логирование приостановлено' : 'Логирование возобновлено');
+    }
+
+    function clearLogs(preservePinned) {
+        const kept = preservePinned ? logs.filter(record => pinnedLogs.has(record)) : [];
+        if (!preservePinned) pinnedLogs.clear();
+        replaceLogs(kept);
+        forgetLogReferences();
+        clearPersistedLogs();
+        persistLogsSoon();
+        if (window.__netLoggerUI && window.__netLoggerUI.refresh) window.__netLoggerUI.refresh();
+        if (window.__netLoggerBar && window.__netLoggerBar.refresh) window.__netLoggerBar.refresh();
     }
 
     function pushLog(entry) {
-        if (window.__netLogger.disabled) return;
+        if (window.__netLogger.disabled || window.__netLogger.paused || shouldIgnoreLog(entry)) return;
+        const requestHeaders = entry.requestHeaders || [];
+        const responseHeaders = entry.responseHeaders || [];
+        if (entry.responsePresent === undefined) {
+            entry.responsePresent = Object.prototype.hasOwnProperty.call(entry, 'response') && entry.response !== undefined;
+        }
+        const hasRequestBody = Object.prototype.hasOwnProperty.call(entry, 'requestBody') && entry.requestBody !== undefined;
+        const measuredRequestSize = hasRequestBody ? measureBodySize(entry.requestBody) : null;
+        const hasResponse = entry.responsePresent;
+        const measuredResponseSize = hasResponse ? measureBodySize(entry.response) : null;
+        if (entry.requestSize == null) {
+            const declaredSize = getDeclaredSize(requestHeaders);
+            entry.requestSize = measuredRequestSize != null ? measuredRequestSize : declaredSize;
+            entry.requestSizeSource = measuredRequestSize != null ? 'body' : (declaredSize !== null ? 'Content-Length' : '');
+        } else if (!entry.requestSizeSource) {
+            entry.requestSizeSource = 'body';
+        }
+        if (entry.responseSize == null) {
+            const declaredSize = getDeclaredSize(responseHeaders);
+            const explicitSize = Object.prototype.hasOwnProperty.call(entry, 'responseSize');
+            entry.responseSize = explicitSize
+                ? declaredSize
+                : (measuredResponseSize != null ? measuredResponseSize : declaredSize);
+            entry.responseSizeSource = explicitSize
+                ? (declaredSize !== null ? 'Content-Length' : '')
+                : (measuredResponseSize != null ? 'body' : (declaredSize !== null ? 'Content-Length' : ''));
+        } else if (!entry.responseSizeSource) {
+            entry.responseSizeSource = 'body';
+        }
+        entry.requestContentType = entry.requestContentType || getHeaderValue(requestHeaders, 'content-type');
+        entry.responseContentType = entry.responseContentType || getHeaderValue(responseHeaders, 'content-type');
+        entry.contentType = entry.responseContentType || entry.requestContentType;
+        if (!Array.isArray(entry.queryParams)) entry.queryParams = parseQueryParams(entry.url);
         logs.push(entry);
         trimLogs();
         if (loadConsoleLogs()) {
@@ -1127,7 +1640,7 @@
             if (entry.status) console.log('status:', entry.status);
             if (entry.duration != null) console.log('duration:', entry.duration.toFixed(0) + ' ms');
             if (entry.requestBody !== null && entry.requestBody !== undefined) console.log('body:', entry.requestBody);
-            if (entry.response) console.log('response:', entry.response);
+            if (entry.responsePresent) console.log('response:', entry.response);
             if (entry.appliedRules) console.log('applied rules:', entry.appliedRules);
             console.groupEnd();
         }
@@ -1138,10 +1651,83 @@
         }
     }
 
+    restoreSessionLogs();
+    setInterval(() => {
+        if (loadBool(LOG_MAX_AGE_ENABLED_KEY, false) && cleanupLogs()) {
+            persistLogsSoon();
+            if (window.__netLoggerUI && window.__netLoggerUI.refresh) window.__netLoggerUI.refresh();
+            if (window.__netLoggerBar && window.__netLoggerBar.refresh) window.__netLoggerBar.refresh();
+        }
+    }, 60000);
+
     function computeXhrResponse(responseType, text) {
         if (responseType === 'json') return safeJson(text);
         if (responseType === '' || responseType === 'text') return text;
         return null;
+    }
+
+    async function readFetchResponse(response) {
+        const contentType = getHeaderValue(normalizeHeaders(response.headers), 'content-type');
+        try {
+            const buffer = await response.clone().arrayBuffer();
+            const size = buffer.byteLength;
+            const mime = contentType.split(';')[0].trim().toLowerCase();
+            const isText = !mime || mime.startsWith('text/') || mime === 'application/json'
+                || mime.endsWith('+json') || mime.endsWith('+xml')
+                || /javascript|xml|form-urlencoded/.test(mime);
+            if (!isText) return { data: `[Binary: ${size} bytes, ${contentType || 'unknown'}]`, size };
+            const text = new TextDecoder().decode(buffer);
+            const parsed = tryParseJsonValue(text);
+            return { data: parsed !== undefined ? parsed : text.substring(0, loadMaxBody()), size };
+        } catch (_) {
+            return { data: null, size: null };
+        }
+    }
+
+    function readXhrResponse(xhr, headers, size) {
+        const contentType = getHeaderValue(headers, 'content-type');
+        const kind = getContentTypeInfo(contentType).label;
+        if (xhr.responseType === 'document') {
+            const html = xhr.responseXML && xhr.responseXML.documentElement
+                ? xhr.responseXML.documentElement.outerHTML
+                : '';
+            return html.substring(0, loadMaxBody());
+        }
+        if (!['', 'text', 'json'].includes(xhr.responseType) || kind === 'IMAGE' || kind === 'BINARY') {
+            return `[Binary: ${size == null ? 'unknown' : size + ' bytes'}, ${contentType || xhr.responseType || 'unknown'}]`;
+        }
+        try {
+            if (xhr.responseType === 'json') return xhr.response;
+            const text = xhr.responseText;
+            const parsed = tryParseJsonValue(text);
+            return parsed !== undefined ? parsed : text.substring(0, loadMaxBody());
+        } catch (error) {
+            return '[error reading: ' + error.message + ']';
+        }
+    }
+
+    function measureXhrResponseSize(xhr, headers) {
+        if (xhr.responseType === '' || xhr.responseType === 'text') {
+            const kind = getContentTypeInfo(getHeaderValue(headers, 'content-type')).label;
+            if (kind === 'IMAGE' || kind === 'BINARY') {
+                const declaredSize = getDeclaredSize(headers);
+                if (declaredSize !== null) return { size: declaredSize, source: 'Content-Length' };
+            }
+            return { size: measureBodySize(xhr.responseText), source: 'body' };
+        }
+        if (xhr.responseType === 'arraybuffer' || xhr.responseType === 'blob') {
+            return { size: measureBodySize(xhr.response), source: 'body' };
+        }
+        const declaredSize = getDeclaredSize(headers);
+        if (declaredSize !== null) return { size: declaredSize, source: 'Content-Length' };
+        if (xhr.responseType === 'document') {
+            const html = xhr.responseXML && xhr.responseXML.documentElement
+                ? xhr.responseXML.documentElement.outerHTML
+                : '';
+            return { size: measureBodySize(html), source: 'body' };
+        }
+        if (xhr.responseType === 'json') return { size: measureBodySize(xhr.response), source: 'body' };
+        return { size: null, source: '' };
     }
 
     function debugLog(...args) {
@@ -1176,6 +1762,7 @@
 
     window.fetch = async function (input, init) {
         if (window.__netLogger.disabled) return originalFetch.apply(this, arguments);
+        const initiator = captureInitiator();
 
         const isRequest = typeof Request !== 'undefined' && input instanceof Request;
 
@@ -1193,19 +1780,27 @@
 
         let origBodyRaw = null;
         let origBodySer = null;
+        let origBodySize = null;
         if (isRequest) {
             try {
-                const t = await input.clone().text();
-                if (t) { origBodyRaw = t; origBodySer = safeJson(t) || t; }
+                const requestBody = input.clone();
+                const buffer = await requestBody.arrayBuffer();
+                origBodySize = buffer.byteLength;
+                const t = new TextDecoder().decode(buffer);
+                if (t) {
+                    origBodyRaw = t;
+                    const parsed = tryParseJsonValue(t);
+                    origBodySer = parsed !== undefined ? parsed : t;
+                }
             } catch (_) {}
         } else if (init && 'body' in init) {
             origBodyRaw = init.body;
             origBodySer = serializeBody(init.body);
+            origBodySize = measureBodySize(init.body);
         }
 
         const matched = matchRules(origUrl, origMethod);
         const applied = rulesSummary(matched);
-        const __start = performance.now();
 
         debugLog('fetch', origMethod, origUrl,
             '| applyRules:', loadApplyRules(),
@@ -1214,10 +1809,11 @@
             matched.length ? matched.map(r => ({ match: r.match, method: r.method, mockStatus: r.mockStatus })) : '');
 
         if (matched.length) {
+            const ruleStart = performance.now();
             const result = applyRules(matched, origUrl, origHeaders, origBodyRaw);
 
             if (result.mocked) {
-                const duration = performance.now() - __start;
+                const duration = performance.now() - ruleStart;
                 const headers = new Headers();
                 (result.mocked.headers || []).forEach(([n, v]) => {
                     try { headers.set(n, v); } catch (_) {}
@@ -1226,7 +1822,8 @@
                     headers.set('content-type', 'application/json');
                 }
                 const responseHeaders = [...headers.entries()].map(([n, v]) => [n, v]);
-                const responseData = safeJson(result.mocked.body) || result.mocked.body;
+                const parsedMockBody = tryParseJsonValue(result.mocked.body);
+                const responseData = parsedMockBody !== undefined ? parsedMockBody : result.mocked.body;
 
                 debugLog('MOCK fired (fetch)', {
                     url: origUrl, status: result.mocked.status,
@@ -1243,7 +1840,9 @@
                     source: 'fetch', time: new Date().toISOString(),
                     method: origMethod, url: origUrl, status: result.mocked.status,
                     requestHeaders: origHeaders, requestBody: origBodySer,
+                    requestSize: origBodySize,
                     responseHeaders, response: responseData,
+                    responseSize: measureBodySize(result.mocked.body), initiator,
                     appliedRules: applied, mocked: true, duration
                 });
 
@@ -1288,61 +1887,61 @@
                 fetchArgs = Array.from(arguments);
             }
 
+            let requestStart = 0;
             try {
+                requestStart = performance.now();
                 const response = await originalFetch.apply(this, fetchArgs);
-                const duration = performance.now() - __start;
-                const clone = response.clone();
+                const duration = performance.now() - requestStart;
                 let resHeaders = [];
                 try { resHeaders = normalizeHeaders(response.headers); } catch (_) {}
-                let responseData = null;
-                try {
-                    const text = await clone.text();
-                    responseData = safeJson(text) || text.substring(0, loadMaxBody());
-                } catch (_) {}
+                const payload = await readFetchResponse(response);
                 pushLog({
                     source: 'fetch', time: new Date().toISOString(),
                     method: origMethod, url: origUrl, status: response.status,
                     requestHeaders: origHeaders, requestBody: origBodySer,
-                    responseHeaders: resHeaders, response: responseData,
+                    requestSize: origBodySize,
+                    responseHeaders: resHeaders, response: payload.data,
+                    responseSize: payload.size, initiator,
                     appliedRules: applied, duration
                 });
                 return response;
             } catch (err) {
-                const duration = performance.now() - __start;
+                const duration = requestStart ? performance.now() - requestStart : 0;
                 pushLog({
                     source: 'fetch', time: new Date().toISOString(),
                     method: origMethod, url: origUrl,
                     requestHeaders: origHeaders, requestBody: origBodySer,
+                    requestSize: origBodySize, initiator,
                     error: String(err), appliedRules: applied, duration
                 });
                 throw err;
             }
         }
 
+        let requestStart = 0;
         try {
+            requestStart = performance.now();
             const response = await originalFetch.apply(this, arguments);
-            const duration = performance.now() - __start;
-            const clone = response.clone();
+            const duration = performance.now() - requestStart;
             let resHeaders = [];
             try { resHeaders = normalizeHeaders(response.headers); } catch (_) {}
-            let responseData = null;
-            try {
-                const text = await clone.text();
-                responseData = safeJson(text) || text.substring(0, loadMaxBody());
-            } catch (_) {}
+            const payload = await readFetchResponse(response);
             pushLog({
                 source: 'fetch', time: new Date().toISOString(),
                 method: origMethod, url: origUrl, status: response.status,
                 requestHeaders: origHeaders, requestBody: origBodySer,
-                responseHeaders: resHeaders, response: responseData, duration
+                requestSize: origBodySize,
+                responseHeaders: resHeaders, response: payload.data,
+                responseSize: payload.size, initiator, duration
             });
             return response;
         } catch (err) {
-            const duration = performance.now() - __start;
+            const duration = requestStart ? performance.now() - requestStart : 0;
             pushLog({
                 source: 'fetch', time: new Date().toISOString(),
                 method: origMethod, url: origUrl,
                 requestHeaders: origHeaders, requestBody: origBodySer,
+                requestSize: origBodySize, initiator,
                 error: String(err), duration
             });
             throw err;
@@ -1420,6 +2019,7 @@
         let reqHeaders = [];
         let matchedRules = [];
         let origBodySer = null;
+        let reqInitiator = '';
         let shadows = null;
         let startTime = 0;
 
@@ -1427,6 +2027,7 @@
         xhr.open = function (method, url) {
             reqMethod = (method || 'GET').toUpperCase();
             reqUrl = url || '';
+            reqInitiator = captureInitiator();
             reqHeaders = [];
             origBodySer = null;
             if (shadows) shadows.setMock(null);
@@ -1500,8 +2101,9 @@
                         source: 'xhr', time: new Date().toISOString(),
                         method: reqMethod, url: reqUrl, status: result.mocked.status,
                         requestHeaders: reqHeaders, requestBody: origBodySer,
+                        requestSize: measureBodySize(body), initiator: reqInitiator,
                         responseHeaders: parseRawHeaders(mockHeaders),
-                        response: result.mocked.body,
+                        response: result.mocked.body, responseSize: measureBodySize(result.mocked.body),
                         appliedRules: applied, mocked: true, duration
                     });
 
@@ -1530,25 +2132,18 @@
 
                 xhr.addEventListener('loadend', function () {
                     const duration = performance.now() - startTime;
-                    let responseData = null;
+                    let responseSizeInfo = { size: null, source: '' };
                     let resHeaders = [];
                     try { resHeaders = parseRawHeaders(xhr.getAllResponseHeaders()); } catch (_) {}
-                    try {
-                        if (xhr.responseType === '' || xhr.responseType === 'text') {
-                            responseData = safeJson(xhr.responseText) || xhr.responseText.substring(0, loadMaxBody());
-                        } else if (xhr.responseType === 'json') {
-                            responseData = xhr.response;
-                        } else {
-                            responseData = '[binary/other responseType: ' + xhr.responseType + ']';
-                        }
-                    } catch (e) {
-                        responseData = '[error reading: ' + e.message + ']';
-                    }
+                    try { responseSizeInfo = measureXhrResponseSize(xhr, resHeaders); } catch (_) {}
+                    const responseData = readXhrResponse(xhr, resHeaders, responseSizeInfo.size);
                     pushLog({
                         source: 'xhr', time: new Date().toISOString(),
                         method: reqMethod, url: reqUrl, status: xhr.status,
                         requestHeaders: reqHeaders, requestBody: origBodySer,
+                        requestSize: measureBodySize(body), initiator: reqInitiator,
                         responseHeaders: resHeaders, response: responseData,
+                        responseSize: responseSizeInfo.size, responseSizeSource: responseSizeInfo.source,
                         appliedRules: applied, duration
                     });
                 });
@@ -1561,25 +2156,18 @@
 
             xhr.addEventListener('loadend', function () {
                 const duration = performance.now() - startTime;
-                let responseData = null;
+                let responseSizeInfo = { size: null, source: '' };
                 let resHeaders = [];
                 try { resHeaders = parseRawHeaders(xhr.getAllResponseHeaders()); } catch (_) {}
-                try {
-                    if (xhr.responseType === '' || xhr.responseType === 'text') {
-                        responseData = safeJson(xhr.responseText) || xhr.responseText.substring(0, loadMaxBody());
-                    } else if (xhr.responseType === 'json') {
-                        responseData = xhr.response;
-                    } else {
-                        responseData = '[binary/other responseType: ' + xhr.responseType + ']';
-                    }
-                } catch (e) {
-                    responseData = '[error reading: ' + e.message + ']';
-                }
+                try { responseSizeInfo = measureXhrResponseSize(xhr, resHeaders); } catch (_) {}
+                const responseData = readXhrResponse(xhr, resHeaders, responseSizeInfo.size);
                 pushLog({
                     source: 'xhr', time: new Date().toISOString(),
                     method: reqMethod, url: reqUrl, status: xhr.status,
                     requestHeaders: reqHeaders, requestBody: origBodySer,
-                    responseHeaders: resHeaders, response: responseData, duration
+                    requestSize: measureBodySize(body), initiator: reqInitiator,
+                    responseHeaders: resHeaders, response: responseData,
+                    responseSize: responseSizeInfo.size, responseSizeSource: responseSizeInfo.source, duration
                 });
             });
             return sendOrig.apply(xhr, arguments);
@@ -1588,6 +2176,183 @@
         return xhr;
     }
     window.XMLHttpRequest = WrappedXHR;
+
+    function inferMessageContentType(data) {
+        if (typeof data === 'string') {
+            try { JSON.parse(data); return 'application/json'; } catch (_) { return 'text/plain'; }
+        }
+        if (typeof Blob !== 'undefined' && data instanceof Blob) return data.type || 'application/octet-stream';
+        if (typeof URLSearchParams !== 'undefined' && data instanceof URLSearchParams) return 'application/x-www-form-urlencoded';
+        if (typeof FormData !== 'undefined' && data instanceof FormData) return 'multipart/form-data';
+        return 'application/octet-stream';
+    }
+
+    async function inspectSocketMessage(data) {
+        const size = measureBodySize(data);
+        if (typeof data === 'string') {
+            const parsed = tryParseJsonValue(data);
+            return {
+                body: parsed !== undefined ? parsed : data.substring(0, loadMaxBody()),
+                size,
+                contentType: parsed !== undefined ? 'application/json' : 'text/plain'
+            };
+        }
+        try {
+            let text = null;
+            if (typeof Blob !== 'undefined' && data instanceof Blob) {
+                text = await data.text();
+            } else if (data instanceof ArrayBuffer) {
+                text = new TextDecoder().decode(data);
+            } else if (ArrayBuffer.isView(data)) {
+                text = new TextDecoder().decode(
+                    new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+                );
+            }
+            if (text !== null) {
+                const parsed = tryParseJsonValue(text);
+                if (parsed !== undefined) return { body: parsed, size, contentType: 'application/json' };
+                if (!/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFD]/.test(text)) {
+                    const blobType = typeof Blob !== 'undefined' && data instanceof Blob ? data.type : '';
+                    const textType = /^(text\/|application\/(?:[^;]+\+)?(?:json|xml))/i.test(blobType)
+                        ? blobType
+                        : 'text/plain';
+                    return { body: text.substring(0, loadMaxBody()), size, contentType: textType };
+                }
+            }
+        } catch (error) {
+            console.warn('[NL] Failed to decode WebSocket message:', error);
+        }
+        return {
+            body: serializeMessage(data),
+            size,
+            contentType: inferMessageContentType(data)
+        };
+    }
+
+    if (typeof window.WebSocket === 'function') {
+        const NativeWebSocket = window.WebSocket;
+        class LoggedWebSocket extends NativeWebSocket {
+            constructor(...args) {
+                super(...args);
+                const url = this.url;
+                const initiator = captureInitiator();
+                this.addEventListener('message', async event => {
+                    if (window.__netLogger.disabled) return;
+                    const message = await inspectSocketMessage(event.data);
+                    pushLog({
+                        source: 'websocket', method: 'MESSAGE', url, time: new Date().toISOString(),
+                        response: message.body, responseSize: message.size,
+                        responseContentType: message.contentType, eventName: event.type,
+                        initiator, requestHeaders: [], responseHeaders: []
+                    });
+                });
+            }
+
+            send(data) {
+                if (window.__netLogger.disabled) return super.send(data);
+                const start = performance.now();
+                const initiator = captureInitiator();
+                const contentType = inferMessageContentType(data);
+                try {
+                    const result = super.send(data);
+                    pushLog({
+                        source: 'websocket', method: 'SEND', url: this.url, time: new Date().toISOString(),
+                        requestBody: serializeMessage(data), requestSize: measureBodySize(data),
+                        requestContentType: contentType, initiator, dispatchDuration: performance.now() - start,
+                        requestHeaders: [], responseHeaders: []
+                    });
+                    return result;
+                } catch (error) {
+                    pushLog({
+                        source: 'websocket', method: 'SEND', url: this.url, time: new Date().toISOString(),
+                        requestBody: serializeMessage(data), requestSize: measureBodySize(data),
+                        requestContentType: contentType, initiator, dispatchDuration: performance.now() - start,
+                        error: String(error), requestHeaders: [], responseHeaders: []
+                    });
+                    throw error;
+                }
+            }
+        }
+        window.WebSocket = LoggedWebSocket;
+    }
+
+    if (typeof window.EventSource === 'function') {
+        const NativeEventSource = window.EventSource;
+        const eventSourceLoggers = new WeakMap();
+        class LoggedEventSource extends NativeEventSource {
+            constructor(...args) {
+                super(...args);
+                const url = this.url;
+                const initiator = captureInitiator();
+                const logMessage = event => {
+                    if (window.__netLogger.disabled) return;
+                    pushLog({
+                        source: 'eventsource', method: 'MESSAGE', url, time: new Date().toISOString(),
+                        response: serializeMessage(event.data), responseSize: measureBodySize(event.data),
+                        responseContentType: 'text/event-stream',
+                        eventName: event.type, lastEventId: event.lastEventId || '',
+                        initiator, requestHeaders: [], responseHeaders: []
+                    });
+                };
+                const loggedTypes = new Set(['message']);
+                eventSourceLoggers.set(this, { logMessage, loggedTypes });
+                super.addEventListener('message', logMessage);
+                super.addEventListener('error', event => {
+                    if (window.__netLogger.disabled) return;
+                    pushLog({
+                        source: 'eventsource', method: 'ERROR', url, time: new Date().toISOString(),
+                        error: 'EventSource connection error', eventName: event.type,
+                        initiator, requestHeaders: [], responseHeaders: []
+                    });
+                });
+            }
+
+            addEventListener(type, listener, options) {
+                const result = super.addEventListener(type, listener, options);
+                const state = eventSourceLoggers.get(this);
+                const eventType = String(type);
+                if (state && eventType !== 'open' && eventType !== 'error' && !state.loggedTypes.has(eventType)) {
+                    state.loggedTypes.add(eventType);
+                    super.addEventListener(eventType, state.logMessage);
+                }
+                return result;
+            }
+        }
+        window.EventSource = LoggedEventSource;
+    }
+
+    if (typeof navigator.sendBeacon === 'function') {
+        const originalSendBeacon = navigator.sendBeacon;
+        navigator.sendBeacon = function (url, data) {
+            if (window.__netLogger.disabled) return originalSendBeacon.apply(this, arguments);
+            const start = performance.now();
+            const initiator = captureInitiator();
+            const requestBody = serializeMessage(data);
+            const requestSize = measureBodySize(data);
+            const requestContentType = data == null
+                ? ''
+                : (typeof Blob !== 'undefined' && data instanceof Blob ? (data.type || 'application/octet-stream') : inferMessageContentType(data));
+            try {
+                const queued = originalSendBeacon.apply(this, arguments);
+                pushLog({
+                    source: 'beacon', method: 'POST', url: String(url), time: new Date().toISOString(),
+                    requestBody, requestSize, requestContentType, beaconQueued: queued,
+                    error: queued ? undefined : 'sendBeacon rejected by browser',
+                    initiator, dispatchDuration: performance.now() - start,
+                    requestHeaders: [], responseHeaders: []
+                });
+                return queued;
+            } catch (error) {
+                pushLog({
+                    source: 'beacon', method: 'POST', url: String(url), time: new Date().toISOString(),
+                    requestBody, requestSize, requestContentType, initiator,
+                    dispatchDuration: performance.now() - start, error: String(error),
+                    requestHeaders: [], responseHeaders: []
+                });
+                throw error;
+            }
+        };
+    }
 
     function makeButton({ text, iconName, variant, size, onClick }) {
         const b = document.createElement('button');
@@ -1610,20 +2375,13 @@
     }
 
     function formatResponse(r) {
-        if (r === null || r === undefined) return '';
+        if (r === undefined) return '';
+        if (r === null) return 'null';
         if (typeof r === 'string') return r;
         try {
             if (loadPrettyPrint()) return JSON.stringify(r, null, 2);
             return JSON.stringify(r);
         } catch (_) { return String(r); }
-    }
-
-    function tryParseJsonObj(str) {
-        try {
-            const v = JSON.parse(str);
-            if (v !== null && typeof v === 'object') return v;
-            return undefined;
-        } catch (_) { return undefined; }
     }
 
     function highlightJson(jsonStr) {
@@ -1663,7 +2421,7 @@
     function formatBodyHtml(body) {
         if (body === null || body === undefined) return '';
         if (typeof body === 'string') {
-            const parsed = tryParseJsonObj(body);
+            const parsed = tryParseJsonValue(body);
             if (parsed !== undefined) return formatJsonHtml(parsed);
             return escapeHtml(body);
         }
@@ -1681,9 +2439,10 @@
     }
 
     function formatResponseHtml(r) {
-        if (r === null || r === undefined) return '';
+        if (r === undefined) return '';
+        if (r === null) return '<span class="nl-j-null">null</span>';
         if (typeof r === 'string') {
-            const parsed = tryParseJsonObj(r);
+            const parsed = tryParseJsonValue(r);
             if (parsed !== undefined) return formatJsonHtml(parsed);
             return escapeHtml(r);
         }
@@ -1702,17 +2461,18 @@
         if (!Array.isArray(pairs) || pairs.length === 0) {
             return `<div class="nl-headers-empty">${escapeHtml(emptyText || 'нет')}</div>`;
         }
-        const rows = pairs.map(([name, value]) => {
-            const isAuth = isAuthorizationHeader(name);
+        const rows = pairs.map(([name, value, state]) => {
+            const isSensitive = isSensitiveHeader(name);
             const safeName = escapeHtml(name);
             const safeValue = escapeHtml(value);
-            if (isAuth) {
+            if (isSensitive) {
+                const revealed = state === 'revealed';
                 return `
-                    <div class="nl-header-row nl-header-auth" data-revealed="0">
+                    <div class="nl-header-row nl-header-sensitive" data-revealed="${revealed ? '1' : '0'}">
                         <span class="nl-header-name">${safeName}:</span>
-                        <span class="nl-header-val masked">••••••••</span>
+                        <span class="nl-header-val${revealed ? '' : ' masked'}">${revealed ? safeValue : '••••••••'}</span>
                         <button type="button" class="nl-eye" title="Показать/скрыть" data-value="${safeValue}">
-                            ${ICONS.eye}
+                            ${revealed ? ICONS.eyeOff : ICONS.eye}
                         </button>
                     </div>
                 `;
@@ -1729,7 +2489,7 @@
 
     function headersToReport(pairs) {
         if (!Array.isArray(pairs) || !pairs.length) return '(нет)';
-        return pairs.map(([n, v]) => isAuthorizationHeader(n) ? `${n}: •••••• (скрыто)` : `${n}: ${v}`).join('\n');
+        return pairs.map(([n, v]) => isSensitiveHeader(n) ? `${n}: •••••• (скрыто)` : `${n}: ${v}`).join('\n');
     }
 
     function formatReport(list) {
@@ -1744,6 +2504,17 @@
             out.push('Source: ' + (r.source || '?'));
             if (r.time) out.push('Time: ' + r.time);
             if (r.duration != null) out.push('Duration: ' + r.duration.toFixed(0) + ' ms');
+            if (r.dispatchDuration != null) out.push('API dispatch duration: ' + r.dispatchDuration.toFixed(2) + ' ms');
+            if (r.requestSize != null) out.push('RequestSize: ' + formatByteSize(r.requestSize));
+            if (r.responseSize != null) out.push('ResponseSize: ' + formatByteSize(r.responseSize));
+            if (r.requestContentType) out.push('RequestContent-Type: ' + r.requestContentType);
+            if (r.responseContentType) out.push('ResponseContent-Type: ' + r.responseContentType);
+            if (r.queryParams && r.queryParams.length) {
+                out.push('Query:');
+                r.queryParams.forEach(([key, value]) => out.push(`  ${key}: ${value}`));
+            }
+            if (r.initiator) out.push('Initiator:\n' + r.initiator);
+            if (r.beaconQueued !== undefined) out.push('BeaconQueued: ' + r.beaconQueued);
             if (r.status) out.push('Status: ' + r.status);
             if (r.error) out.push('ERROR: ' + r.error);
             if (r.appliedRules && r.appliedRules.length) {
@@ -1761,7 +2532,7 @@
                 out.push('ResponseHeaders:');
                 out.push(headersToReport(r.responseHeaders));
             }
-            if (r.response !== null && r.response !== undefined) {
+            if (r.responsePresent || (r.response !== null && r.response !== undefined)) {
                 out.push('Response:');
                 out.push(formatResponse(r.response));
             }
@@ -1799,8 +2570,8 @@
             parts.push(`-X ${r.method.toUpperCase()}`);
         }
         (r.requestHeaders || []).forEach(([n, v]) => {
-            const val = isAuthorizationHeader(n) ? '$TOKEN' : v;
-            parts.push(`-H '${n}: ${shq(val)}'`);
+            const val = isSensitiveHeader(n) ? '$TOKEN' : v;
+            parts.push(`-H '${shq(`${n}: ${val}`)}'`);
         });
         const body = r.requestBody;
         if (body !== null && body !== undefined) {
@@ -1810,9 +2581,9 @@
                 if (ctVal.includes('multipart/form-data') || ctVal === '') {
                     body.entries.forEach(([k, v]) => {
                         if (typeof v === 'string' && v.startsWith('[File:')) {
-                            parts.push(`-F '${k}=@/path/to/file'`);
+                            parts.push(`-F '${shq(`${k}=@/path/to/file`)}'`);
                         } else {
-                            parts.push(`-F '${k}=${shq(v)}'`);
+                            parts.push(`-F '${shq(`${k}=${v}`)}'`);
                         }
                     });
                 } else {
@@ -1828,7 +2599,7 @@
                 parts.push(`--data-raw '${shq(String(body))}'`);
             }
         }
-        parts.push(`'${getFullUrl(r)}'`);
+        parts.push(`'${shq(getFullUrl(r))}'`);
         return parts.join(' \\\n  ');
     }
 
@@ -1836,12 +2607,29 @@
         const opts = { method: (r.method || 'GET').toUpperCase() };
         const headers = {};
         (r.requestHeaders || []).forEach(([n, v]) => {
-            headers[n] = isAuthorizationHeader(n) ? '<TOKEN>' : v;
+            headers[n] = isSensitiveHeader(n) ? '<TOKEN>' : v;
         });
         if (Object.keys(headers).length) opts.headers = headers;
         const bodyStr = bodyToString(r);
-        if (bodyStr) opts.body = bodyStr;
+        if (bodyStr && !['GET', 'HEAD'].includes(opts.method)) opts.body = bodyStr;
         return `fetch(${JSON.stringify(getFullUrl(r))}, ${JSON.stringify(opts, null, 2)});`;
+    }
+
+    function buildXhr(r) {
+        const method = (r.method || 'GET').toUpperCase();
+        const lines = [
+            'const xhr = new XMLHttpRequest();',
+            `xhr.open(${JSON.stringify(method)}, ${JSON.stringify(getFullUrl(r))});`
+        ];
+        (r.requestHeaders || []).forEach(([name, value]) => {
+            const safeValue = isSensitiveHeader(name) ? '<TOKEN>' : value;
+            lines.push(`xhr.setRequestHeader(${JSON.stringify(name)}, ${JSON.stringify(safeValue)});`);
+        });
+        lines.push('xhr.onload = () => console.log(xhr.status, xhr.responseText);');
+        lines.push('xhr.onerror = () => console.error(\"Request failed\");');
+        const body = bodyToString(r);
+        lines.push(`xhr.send(${body && !['GET', 'HEAD'].includes(method) ? JSON.stringify(body) : 'null'});`);
+        return lines.join('\n');
     }
 
     function buildFull(r) {
@@ -1850,6 +2638,16 @@
         if (r.status) parts.push(`Status: ${r.status}`);
         if (r.time) parts.push(`Time: ${r.time}`);
         if (r.duration != null) parts.push(`Duration: ${r.duration.toFixed(0)} ms`);
+        if (r.dispatchDuration != null) parts.push(`API dispatch duration: ${r.dispatchDuration.toFixed(2)} ms`);
+        if (r.requestSize != null) parts.push(`Request size: ${formatByteSize(r.requestSize)}`);
+        if (r.responseSize != null) parts.push(`Response size: ${formatByteSize(r.responseSize)}`);
+        if (r.requestContentType) parts.push(`Request Content-Type: ${r.requestContentType}`);
+        if (r.responseContentType) parts.push(`Response Content-Type: ${r.responseContentType}`);
+        if (r.queryParams && r.queryParams.length) {
+            parts.push('Query:');
+            r.queryParams.forEach(([key, value]) => parts.push(`  ${key}: ${value}`));
+        }
+        if (r.initiator) parts.push('Initiator:\n' + r.initiator);
         if (r.mocked) parts.push('MOCKED: yes');
         if (r.appliedRules && r.appliedRules.length) {
             parts.push('Applied rules:');
@@ -1858,7 +2656,7 @@
         parts.push('');
         parts.push('Request headers:');
         (r.requestHeaders || []).forEach(([n, v]) => {
-            parts.push(`  ${n}: ${isAuthorizationHeader(n) ? '•••••• (скрыто)' : v}`);
+            parts.push(`  ${n}: ${isSensitiveHeader(n) ? '•••••• (скрыто)' : v}`);
         });
         if (r.requestBody !== null && r.requestBody !== undefined) {
             parts.push('');
@@ -1867,8 +2665,8 @@
         }
         parts.push('');
         parts.push('Response headers:');
-        (r.responseHeaders || []).forEach(([n, v]) => parts.push(`  ${n}: ${v}`));
-        if (r.response !== null && r.response !== undefined) {
+        (r.responseHeaders || []).forEach(([n, v]) => parts.push(`  ${n}: ${isSensitiveHeader(n) ? '•••••• (скрыто)' : v}`));
+        if (r.responsePresent || (r.response !== null && r.response !== undefined)) {
             parts.push('');
             parts.push('Response:');
             parts.push(formatResponse(r.response));
@@ -1889,6 +2687,185 @@
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+
+    function downloadJsonFile(filename, value) {
+        const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+
+    function exportLogsBundle() {
+        return {
+            format: 'api-tools-logs',
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            logs: logs.map(recordForJsonExport),
+            pinnedIndexes: logs.reduce((indexes, record, index) => {
+                if (pinnedLogs.has(record)) indexes.push(index);
+                return indexes;
+            }, [])
+        };
+    }
+
+    function normalizeImportedRecord(record) {
+        if (!record || typeof record !== 'object' || Array.isArray(record)
+            || typeof record.url !== 'string' || typeof record.method !== 'string') return null;
+        const allowedSources = new Set(['fetch', 'xhr', 'websocket', 'eventsource', 'beacon']);
+        const normalized = {
+            source: allowedSources.has(record.source) ? record.source : 'fetch',
+            method: record.method.slice(0, 64),
+            url: record.url.slice(0, 10000),
+            time: typeof record.time === 'string' ? record.time : new Date().toISOString(),
+            requestHeaders: Array.isArray(record.requestHeaders)
+                ? record.requestHeaders.filter(pair => Array.isArray(pair) && pair.length >= 2).map(([name, value]) => [String(name), String(value)])
+                : [],
+            responseHeaders: Array.isArray(record.responseHeaders)
+                ? record.responseHeaders.filter(pair => Array.isArray(pair) && pair.length >= 2).map(([name, value]) => [String(name), String(value)])
+                : [],
+            queryParams: Array.isArray(record.queryParams)
+                ? record.queryParams.filter(pair => Array.isArray(pair) && pair.length >= 2).map(([name, value]) => [String(name), String(value)])
+                : parseQueryParams(record.url)
+        };
+        [
+            'status', 'duration', 'dispatchDuration', 'requestSize', 'responseSize',
+            'requestSizeSource', 'responseSizeSource', 'requestContentType', 'responseContentType',
+            'contentType', 'initiator', 'error', 'requestBody', 'response', 'responsePresent',
+            'eventName', 'lastEventId', 'beaconQueued', 'mocked', 'statusText', 'httpVersion'
+        ].forEach(key => {
+            if (Object.prototype.hasOwnProperty.call(record, key)) normalized[key] = record[key];
+        });
+        if (Array.isArray(record.appliedRules)) {
+            normalized.appliedRules = record.appliedRules.filter(rule => rule && typeof rule === 'object')
+                .map(rule => ({
+                    id: String(rule.id || ''),
+                    match: String(rule.match || ''),
+                    method: String(rule.method || 'ANY'),
+                    mocked: !!rule.mocked
+                }));
+        }
+        return normalized;
+    }
+
+    async function importLogsFile(file) {
+        if (!file) return;
+        const maxBytes = loadConfiguredNum(LOG_IMPORT_MAX_MB_KEY, 10, 1, 100) * 1024 * 1024;
+        if (file.size > maxBytes) {
+            showToast(`Файл больше лимита ${Math.round(maxBytes / 1024 / 1024)} MB`);
+            return;
+        }
+        try {
+            const parsed = JSON.parse(await file.text());
+            if (!parsed || parsed.format !== 'api-tools-logs' || parsed.version !== 1 || !Array.isArray(parsed.logs)) {
+                throw new Error('Ожидается JSON-экспорт API Tools с массивом logs');
+            }
+            if (parsed.logs.length > 100000) throw new Error('В файле слишком много записей');
+            const imported = parsed.logs.map((record, index) => ({
+                record: normalizeImportedRecord(record),
+                pinned: Array.isArray(parsed.pinnedIndexes) && parsed.pinnedIndexes.includes(index)
+            })).filter(item => item.record);
+            if (!imported.length) {
+                showToast('В файле нет корректных запросов');
+                return;
+            }
+            if (!confirm(`Добавить ${imported.length} запросов к текущим ${logs.length}?`)) return;
+            imported.forEach(item => {
+                logs.push(item.record);
+                if (item.pinned) pinnedLogs.add(item.record);
+            });
+            trimLogs();
+            if (window.__netLoggerUI && window.__netLoggerUI.refresh) window.__netLoggerUI.refresh();
+            if (window.__netLoggerBar && window.__netLoggerBar.refresh) window.__netLoggerBar.refresh();
+            showToast(`Импортировано: ${imported.length}`);
+        } catch (error) {
+            console.warn('[API Tools] Не удалось импортировать логи:', error);
+            showToast('Ошибка импорта: ' + String(error.message || error));
+        }
+    }
+
+    function redactHeadersForExport(headers) {
+        return (headers || []).map(([name, value]) => [
+            name,
+            isSensitiveHeader(name) ? '[REDACTED]' : value
+        ]);
+    }
+
+    function recordForJsonExport(record) {
+        return {
+            ...record,
+            requestHeaders: redactHeadersForExport(record.requestHeaders),
+            responseHeaders: redactHeadersForExport(record.responseHeaders)
+        };
+    }
+
+    function buildHar(list) {
+        const entries = list.filter(record => ['fetch', 'xhr', 'beacon'].includes(record.source)).map(record => {
+            const durationValue = record.duration != null ? record.duration : record.dispatchDuration;
+            const duration = Number.isFinite(Number(durationValue)) ? Number(durationValue) : 0;
+            const requestBodyPresent = record.requestBody !== null && record.requestBody !== undefined;
+            const responsePresent = record.responsePresent || (record.response !== null && record.response !== undefined);
+            const requestSize = record.requestSize != null && Number.isFinite(Number(record.requestSize)) ? Number(record.requestSize) : -1;
+            const responseSize = record.responseSize != null && Number.isFinite(Number(record.responseSize)) ? Number(record.responseSize) : -1;
+            const request = {
+                method: record.method || 'GET',
+                url: getFullUrl(record),
+                httpVersion: record.httpVersion || 'HTTP/1.1',
+                cookies: [],
+                headers: redactHeadersForExport(record.requestHeaders).map(([name, value]) => ({ name, value: String(value) })),
+                queryString: (record.queryParams || parseQueryParams(record.url)).map(([name, value]) => ({ name, value })),
+                headersSize: -1,
+                bodySize: requestSize
+            };
+            if (requestBodyPresent) {
+                request.postData = {
+                    mimeType: record.requestContentType || 'text/plain',
+                    text: bodyToString(record)
+                };
+            }
+            const response = {
+                status: Number.isFinite(Number(record.status)) ? Number(record.status) : 0,
+                statusText: record.statusText || '',
+                httpVersion: record.httpVersion || 'HTTP/1.1',
+                cookies: [],
+                headers: redactHeadersForExport(record.responseHeaders).map(([name, value]) => ({ name, value: String(value) })),
+                content: {
+                    size: responseSize,
+                    mimeType: record.responseContentType || 'application/octet-stream'
+                },
+                redirectURL: '',
+                headersSize: -1,
+                bodySize: responseSize
+            };
+            if (responsePresent) response.content.text = formatResponse(record.response);
+            return {
+                startedDateTime: record.time || new Date().toISOString(),
+                time: duration,
+                request,
+                response,
+                cache: {},
+                timings: { blocked: -1, dns: -1, connect: -1, send: 0, wait: duration, receive: 0, ssl: -1 }
+            };
+        });
+        return {
+            log: {
+                version: '1.2',
+                creator: { name: 'API Tools', version: SCRIPT_VERSION },
+                entries
+            }
+        };
+    }
+
+    function downloadHar(list) {
+        const filename = (location.hostname.replace(/[^a-z0-9.-]/gi, '_') || 'site')
+            + '-netlog-'
+            + new Date().toISOString().replace(/[:.]/g, '-')
+            + '.har';
+        downloadJsonFile(filename, buildHar(list));
     }
 
     function buildOverlay() {
@@ -2178,6 +3155,65 @@
             }
         }));
         root.appendChild(layoutCard);
+
+        const positionCard = makeCard('Кнопка действий', 'activity');
+        const positionField = makeField({
+            label: 'Расположение на экране',
+            hint: 'Выберите угол, в котором будет отображаться кнопка открытия панели.'
+        });
+        const preview = document.createElement('div');
+        preview.className = 'nl-position-preview';
+        preview.setAttribute('role', 'group');
+        preview.setAttribute('aria-label', 'Предпросмотр расположения кнопки');
+        const previewBar = document.createElement('div');
+        previewBar.className = 'nl-position-preview-bar';
+        for (let i = 0; i < 3; i++) {
+            const dot = document.createElement('span');
+            dot.className = 'nl-position-preview-dot';
+            previewBar.appendChild(dot);
+        }
+        preview.appendChild(previewBar);
+        for (let i = 0; i < 3; i++) {
+            const line = document.createElement('div');
+            line.className = 'nl-position-preview-line';
+            preview.appendChild(line);
+        }
+        const positions = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
+        const renderPosition = () => {
+            const current = loadFabPosition();
+            preview.querySelectorAll('.nl-position-option').forEach(button => {
+                const active = button.dataset.position === current;
+                button.classList.toggle('active', active);
+                button.setAttribute('aria-pressed', active ? 'true' : 'false');
+            });
+        };
+        positions.forEach(position => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'nl-position-option';
+            button.dataset.position = position;
+            button.title = {
+                'top-left': 'Сверху слева',
+                'top-right': 'Сверху справа',
+                'bottom-left': 'Снизу слева',
+                'bottom-right': 'Снизу справа'
+            }[position];
+            button.setAttribute('aria-label', button.title);
+            button.innerHTML = ICONS.activity;
+            button.addEventListener('click', () => {
+                saveFabPosition(position);
+                if (window.__netLoggerUI && typeof window.__netLoggerUI.setPosition === 'function') {
+                    window.__netLoggerUI.setPosition(position);
+                }
+                renderPosition();
+                showToast('Положение кнопки обновлено');
+            });
+            preview.appendChild(button);
+        });
+        renderPosition();
+        positionField.inline.appendChild(preview);
+        positionCard.appendChild(positionField);
+        root.appendChild(positionCard);
     }
 
     function buildCapturePanel(root) {
@@ -2216,7 +3252,7 @@
 
         const logsField = makeField({
             label: 'Максимальное число записей',
-            hint: 'Старые записи автоматически удаляются. От 10 до 100000.'
+            hint: 'Пример: 500. При включённом ring buffer остаются последние записи. От 10 до 100000.'
         });
         const inputLogs = document.createElement('input');
         inputLogs.className = 'nl-input';
@@ -2224,17 +3260,47 @@
         inputLogs.min = '10';
         inputLogs.max = '100000';
         inputLogs.step = '10';
+        inputLogs.required = true;
         inputLogs.value = String(loadMaxLogs());
+        const logLimitSwitch = makeSwitch({
+            label: 'Ограничивать количество логов (ring buffer)',
+            desc: 'Отключение снимает лимит количества и может увеличить потребление памяти.',
+            checked: loadBool(LOG_LIMIT_ENABLED_KEY, true),
+            onChange: enabled => {
+                if (enabled) {
+                    const value = Number(inputLogs.value);
+                    if (!inputLogs.value.trim() || !Number.isInteger(value) || value < 10 || value > 100000) {
+                        logLimitSwitch.querySelector('input').checked = false;
+                        showToast('Заполните лимит: целое число от 10 до 100000');
+                        return;
+                    }
+                    if (!saveMaxLogs(value)) {
+                        logLimitSwitch.querySelector('input').checked = false;
+                        return;
+                    }
+                }
+                if (!saveLogConfig(LOG_LIMIT_ENABLED_KEY, enabled ? '1' : '0')) {
+                    logLimitSwitch.querySelector('input').checked = !enabled;
+                    return;
+                }
+                trimLogs();
+                if (window.__netLoggerUI && window.__netLoggerUI.refresh) window.__netLoggerUI.refresh();
+                showToast(enabled ? 'Ring buffer включён' : 'Ring buffer выключен');
+            }
+        });
+        limitsCard.appendChild(logLimitSwitch);
         logsField.inline.appendChild(inputLogs);
         logsField.inline.appendChild(makeButton({
             text: 'Сохранить', iconName: 'settings', variant: 'primary', size: 'sm',
             onClick: () => {
                 const v = parseInt(inputLogs.value, 10);
-                if (!Number.isFinite(v) || v < 10 || v > 100000) {
+                if (!inputLogs.value.trim() || !Number.isInteger(Number(inputLogs.value)) || !Number.isFinite(v) || v < 10 || v > 100000) {
                     showToast('Введите число от 10 до 100000');
                     return;
                 }
-                saveMaxLogs(v);
+                if (!saveMaxLogs(v)) return;
+                trimLogs();
+                if (window.__netLoggerUI && window.__netLoggerUI.refresh) window.__netLoggerUI.refresh();
                 showToast('Сохранено: ' + v);
             }
         }));
@@ -2266,6 +3332,229 @@
         }));
         limitsCard.appendChild(slowField);
         root.appendChild(limitsCard);
+
+        const retentionCard = makeCard('Хранение логов', 'cpu');
+        const persistenceMbInput = document.createElement('input');
+        persistenceMbInput.className = 'nl-input';
+        persistenceMbInput.type = 'number';
+        persistenceMbInput.min = '1';
+        persistenceMbInput.max = '50';
+        persistenceMbInput.step = '1';
+        persistenceMbInput.required = true;
+        persistenceMbInput.value = loadConfiguredNumInput(LOG_PERSISTENCE_MB_KEY, 1, 50);
+        persistenceMbInput.placeholder = 'Например, 2';
+        const persistenceField = makeField({
+            label: 'Лимит сохранения в sessionStorage (MB)',
+            hint: 'Пример: 2 MB. Логи восстановятся после F5, но sessionStorage очищается при закрытии вкладки. Данные страницы остаются локально и могут содержать секреты.'
+        });
+        persistenceField.inline.appendChild(persistenceMbInput);
+        const persistenceSwitch = makeSwitch({
+            label: 'Сохранять логи между перезагрузками',
+            desc: 'Восстанавливает записи после F5 в этой же вкладке.',
+            checked: loadBool(LOG_PERSISTENCE_KEY, false),
+            onChange: enabled => {
+                const value = Number(persistenceMbInput.value);
+                if (enabled && (!persistenceMbInput.value.trim() || !Number.isInteger(value) || value < 1 || value > 50)) {
+                    persistenceSwitch.querySelector('input').checked = false;
+                    showToast('Заполните лимит sessionStorage: целое число от 1 до 50 MB');
+                    return;
+                }
+                if (enabled && !saveLogConfig(LOG_PERSISTENCE_MB_KEY, value)) {
+                    persistenceSwitch.querySelector('input').checked = false;
+                    return;
+                }
+                if (!saveLogConfig(LOG_PERSISTENCE_KEY, enabled ? '1' : '0')) {
+                    persistenceSwitch.querySelector('input').checked = !enabled;
+                    return;
+                }
+                if (!enabled) clearPersistedLogs();
+                persistLogsSoon();
+                showToast(enabled ? 'Сохранение между перезагрузками включено' : 'Сохранение выключено');
+            }
+        });
+        retentionCard.appendChild(persistenceSwitch);
+        retentionCard.appendChild(persistenceField);
+
+        const ageInput = document.createElement('input');
+        ageInput.className = 'nl-input';
+        ageInput.type = 'number';
+        ageInput.min = '1';
+        ageInput.max = '525600';
+        ageInput.step = '1';
+        ageInput.required = true;
+        ageInput.value = loadConfiguredNumInput(LOG_MAX_AGE_MINUTES_KEY, 1, 525600);
+        ageInput.placeholder = 'Например, 60';
+        const ageField = makeField({
+            label: 'Хранить не дольше (минуты)',
+            hint: 'Пример: 60 минут. Старые записи удаляются при поступлении следующего запроса и после импорта.'
+        });
+        ageField.inline.appendChild(ageInput);
+        ageField.inline.appendChild(makeButton({
+            text: 'Сохранить', iconName: 'settings', variant: 'primary', size: 'sm',
+            onClick: () => {
+                const value = Number(ageInput.value);
+                if (!ageInput.value.trim() || !Number.isInteger(value) || value < 1 || value > 525600) {
+                    showToast('Введите целое число минут от 1 до 525600');
+                    return;
+                }
+                if (!saveLogConfig(LOG_MAX_AGE_MINUTES_KEY, value)) return;
+                cleanupLogs();
+                trimLogs();
+                showToast('Максимальный срок хранения: ' + value + ' мин');
+            }
+        }));
+        const ageSwitch = makeSwitch({
+            label: 'Автоочистка по времени',
+            desc: 'Удалять записи, старше заданного срока.',
+            checked: loadBool(LOG_MAX_AGE_ENABLED_KEY, false),
+            onChange: enabled => {
+                const value = Number(ageInput.value);
+                if (enabled && (!ageInput.value.trim() || !Number.isInteger(value) || value < 1 || value > 525600)) {
+                    ageSwitch.querySelector('input').checked = false;
+                    showToast('Заполните срок хранения: целое число минут от 1 до 525600');
+                    return;
+                }
+                if (enabled && !saveLogConfig(LOG_MAX_AGE_MINUTES_KEY, value)) {
+                    ageSwitch.querySelector('input').checked = false;
+                    return;
+                }
+                if (!saveLogConfig(LOG_MAX_AGE_ENABLED_KEY, enabled ? '1' : '0')) {
+                    ageSwitch.querySelector('input').checked = !enabled;
+                    return;
+                }
+                trimLogs();
+                if (window.__netLoggerUI && window.__netLoggerUI.refresh) window.__netLoggerUI.refresh();
+            }
+        });
+        retentionCard.appendChild(ageSwitch);
+        retentionCard.appendChild(ageField);
+
+        const sizeInput = document.createElement('input');
+        sizeInput.className = 'nl-input';
+        sizeInput.type = 'number';
+        sizeInput.min = '1';
+        sizeInput.max = '500';
+        sizeInput.step = '1';
+        sizeInput.required = true;
+        sizeInput.value = loadConfiguredNumInput(LOG_MAX_SIZE_MB_KEY, 1, 500);
+        sizeInput.placeholder = 'Например, 25';
+        const sizeField = makeField({
+            label: 'Максимальный объём логов (MB)',
+            hint: 'Пример: 25 MB. При превышении старые записи удаляются; закреплённые сохраняются, пока это возможно.'
+        });
+        sizeField.inline.appendChild(sizeInput);
+        sizeField.inline.appendChild(makeButton({
+            text: 'Сохранить', iconName: 'settings', variant: 'primary', size: 'sm',
+            onClick: () => {
+                const value = Number(sizeInput.value);
+                if (!sizeInput.value.trim() || !Number.isInteger(value) || value < 1 || value > 500) {
+                    showToast('Введите целое число от 1 до 500 MB');
+                    return;
+                }
+                if (!saveLogConfig(LOG_MAX_SIZE_MB_KEY, value)) return;
+                cleanupLogs();
+                trimLogs();
+                showToast('Максимальный объём: ' + value + ' MB');
+            }
+        }));
+        const sizeSwitch = makeSwitch({
+            label: 'Автоочистка по объёму',
+            desc: 'Удалять самые старые записи при достижении лимита.',
+            checked: loadBool(LOG_MAX_SIZE_ENABLED_KEY, false),
+            onChange: enabled => {
+                const value = Number(sizeInput.value);
+                if (enabled && (!sizeInput.value.trim() || !Number.isInteger(value) || value < 1 || value > 500)) {
+                    sizeSwitch.querySelector('input').checked = false;
+                    showToast('Заполните лимит объёма: целое число от 1 до 500 MB');
+                    return;
+                }
+                if (enabled && !saveLogConfig(LOG_MAX_SIZE_MB_KEY, value)) {
+                    sizeSwitch.querySelector('input').checked = false;
+                    return;
+                }
+                if (!saveLogConfig(LOG_MAX_SIZE_ENABLED_KEY, enabled ? '1' : '0')) {
+                    sizeSwitch.querySelector('input').checked = !enabled;
+                    return;
+                }
+                trimLogs();
+                if (window.__netLoggerUI && window.__netLoggerUI.refresh) window.__netLoggerUI.refresh();
+            }
+        });
+        retentionCard.appendChild(sizeSwitch);
+        retentionCard.appendChild(sizeField);
+        root.appendChild(retentionCard);
+
+        const ioCard = makeCard('Экспорт и импорт логов', 'code');
+        const importLimitInput = document.createElement('input');
+        importLimitInput.className = 'nl-input';
+        importLimitInput.type = 'number';
+        importLimitInput.min = '1';
+        importLimitInput.max = '100';
+        importLimitInput.step = '1';
+        importLimitInput.required = true;
+        importLimitInput.value = loadConfiguredNumInput(LOG_IMPORT_MAX_MB_KEY, 1, 100);
+        importLimitInput.placeholder = 'Например, 10';
+        const importLimitField = makeField({
+            label: 'Максимальный размер файла импорта (MB)',
+            hint: 'Пример: 10 MB. Большие файлы отклоняются до чтения.'
+        });
+        importLimitField.inline.appendChild(importLimitInput);
+        const ioButtons = document.createElement('div');
+        ioButtons.className = 'nl-excl-actions';
+        const exportLogsButton = makeButton({
+            text: 'Экспорт JSON', iconName: 'download', size: 'sm',
+            onClick: () => {
+                if (!logs.length) { showToast('Пока нет логов для экспорта'); return; }
+                downloadJsonFile(
+                    'api-tools-logs-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json',
+                    exportLogsBundle()
+                );
+                showToast('Экспортировано: ' + logs.length + ' запросов');
+            }
+        });
+        const importLogsButton = makeButton({
+            text: 'Импорт JSON', iconName: 'upload', size: 'sm',
+            onClick: () => {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.json,application/json';
+                input.addEventListener('change', () => importLogsFile(input.files && input.files[0]));
+                input.click();
+            }
+        });
+        ioButtons.appendChild(exportLogsButton);
+        ioButtons.appendChild(importLogsButton);
+        const ioSwitch = makeSwitch({
+            label: 'Включить экспорт и импорт JSON',
+            desc: 'Экспорт скрывает Authorization/Cookie в заголовках. Тела могут содержать личные данные — проверьте файл перед отправкой.',
+            checked: loadBool(LOG_IO_ENABLED_KEY, false),
+            onChange: enabled => {
+                const value = Number(importLimitInput.value);
+                if (enabled && (!importLimitInput.value.trim() || !Number.isInteger(value) || value < 1 || value > 100)) {
+                    ioSwitch.querySelector('input').checked = false;
+                    showToast('Заполните размер файла импорта: целое число от 1 до 100 MB');
+                    return;
+                }
+                if (enabled && !saveLogConfig(LOG_IMPORT_MAX_MB_KEY, value)) {
+                    ioSwitch.querySelector('input').checked = false;
+                    return;
+                }
+                if (!saveLogConfig(LOG_IO_ENABLED_KEY, enabled ? '1' : '0')) {
+                    ioSwitch.querySelector('input').checked = !enabled;
+                    return;
+                }
+                exportLogsButton.disabled = !enabled;
+                importLogsButton.disabled = !enabled;
+                if (window.__netLoggerUI && window.__netLoggerUI.refresh) window.__netLoggerUI.refresh();
+                showToast(enabled ? 'Экспорт и импорт включены' : 'Экспорт и импорт выключены');
+            }
+        });
+        ioCard.appendChild(ioSwitch);
+        ioCard.appendChild(importLimitField);
+        ioCard.appendChild(ioButtons);
+        exportLogsButton.disabled = !loadBool(LOG_IO_ENABLED_KEY, false);
+        importLogsButton.disabled = !loadBool(LOG_IO_ENABLED_KEY, false);
+        root.appendChild(ioCard);
 
         const behaviorCard = makeCard('Поведение', 'activity');
         behaviorCard.appendChild(makeSwitch({
@@ -2302,6 +3591,20 @@
             }
         }));
         root.appendChild(behaviorCard);
+
+        const examplesCard = makeCard('Примеры', 'info');
+        const examples = document.createElement('div');
+        examples.className = 'nl-settings-desc';
+        examples.style.margin = '0';
+        examples.style.whiteSpace = 'pre-wrap';
+        examples.textContent = 'Для короткой отладки: ring buffer 500 записей и пауза сразу после нужного вызова.\nДля возврата после F5: включите sessionStorage с лимитом 2 MB.\nДля долгой сессии: автоочистка через 60 минут и/или при достижении 25 MB.\nДля передачи логов: включите JSON-обмен, экспортируйте файл и отправьте его коллеге после проверки тел запросов на личные данные.';
+        examplesCard.appendChild(examples);
+        const formatHint = document.createElement('div');
+        formatHint.className = 'nl-settings-desc';
+        formatHint.style.margin = '10px 0 0';
+        formatHint.innerHTML = 'Пример структуры JSON: <code>{"format":"api-tools-logs","version":1,"logs":[...],"pinnedIndexes":[]}</code>';
+        examplesCard.appendChild(formatHint);
+        root.appendChild(examplesCard);
 
         const extraCard = makeCard('Дополнительно', 'settings');
         extraCard.appendChild(makeSwitch({
@@ -2843,6 +4146,216 @@
         doCheck(false);
     }
 
+    function buildIgnoreRulesPanel(root) {
+        buildSettingsHeader(root, {
+            title: 'Правила логирования',
+            subtitle: 'Совпавшие запросы не сохраняются в списке и не выводятся в Console. Сетевой запрос всё равно выполняется; это не исключение сайта.',
+            iconName: 'ban'
+        });
+
+        const editorCard = makeCard('Добавить правило', 'plus');
+        const urlRow = document.createElement('div');
+        urlRow.className = 'nl-field-inline';
+        const urlInput = document.createElement('input');
+        urlInput.className = 'nl-input';
+        urlInput.placeholder = 'Например, /api/private';
+        urlInput.style.flex = '1';
+        const matchType = document.createElement('select');
+        matchType.className = 'nl-input';
+        [['substring', 'Вхождение'], ['glob', 'Glob (*, ?)'], ['regex', 'Regex']].forEach(([value, label]) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            matchType.appendChild(option);
+        });
+        urlRow.appendChild(urlInput);
+        urlRow.appendChild(matchType);
+        const urlField = makeField({
+            label: 'URL-паттерн (необязательно)',
+            hint: 'Substring ищет фрагмент URL; glob поддерживает * и ?; regex — регулярное выражение.'
+        });
+        urlField.inline.appendChild(urlRow);
+        editorCard.appendChild(urlField);
+
+        const methodInput = document.createElement('input');
+        methodInput.className = 'nl-input';
+        methodInput.placeholder = 'ANY или POST';
+        const methodField = makeField({
+            label: 'Метод (необязательно)',
+            hint: 'Пример: POST. ANY или пустое поле не ограничивает метод.'
+        });
+        methodField.inline.appendChild(methodInput);
+        editorCard.appendChild(methodField);
+
+        const hostInput = document.createElement('input');
+        hostInput.className = 'nl-input';
+        hostInput.placeholder = 'example.com или *.example.com';
+        const hostField = makeField({
+            label: 'Хост (необязательно)',
+            hint: 'Точное имя хоста или *.example.com для домена и поддоменов; без протокола и пути.'
+        });
+        hostField.inline.appendChild(hostInput);
+        editorCard.appendChild(hostField);
+
+        const formHint = document.createElement('div');
+        formHint.className = 'nl-settings-desc';
+        formHint.style.margin = '0';
+        formHint.textContent = 'Заполните хотя бы одно поле. Если заполнено несколько, должны совпасть все условия.';
+        editorCard.appendChild(formHint);
+
+        const actions = document.createElement('div');
+        actions.className = 'nl-excl-actions';
+        editorCard.appendChild(actions);
+        const listCard = makeCard('Список правил', 'ban');
+        const listWrap = document.createElement('div');
+        listWrap.className = 'nl-excl-list';
+        listCard.appendChild(listWrap);
+        root.appendChild(editorCard);
+        root.appendChild(listCard);
+
+        let editingId = null;
+        const cancelButton = makeButton({ text: 'Отмена', size: 'sm', onClick: resetForm });
+        cancelButton.style.display = 'none';
+        const saveButton = makeButton({
+            text: 'Добавить правило',
+            iconName: 'plus',
+            variant: 'primary',
+            size: 'sm',
+            onClick: saveRule
+        });
+        actions.appendChild(saveButton);
+        actions.appendChild(cancelButton);
+
+        function resetForm() {
+            editingId = null;
+            urlInput.value = '';
+            matchType.value = 'substring';
+            methodInput.value = '';
+            hostInput.value = '';
+            saveButton.querySelector('span').textContent = 'Добавить правило';
+            cancelButton.style.display = 'none';
+        }
+
+        function saveRule() {
+            const urlPattern = urlInput.value.trim();
+            const rawMethod = methodInput.value.trim().toUpperCase();
+            const method = !rawMethod || rawMethod === 'ANY' ? 'ANY' : rawMethod;
+            const host = hostInput.value.trim().toLowerCase();
+            if (!urlPattern && method === 'ANY' && !host) {
+                showToast('Заполните хотя бы URL-паттерн, метод или хост');
+                return;
+            }
+            if (method !== 'ANY' && !/^[A-Z0-9!#$%&'*+.^_~-]+$/.test(method)) {
+                showToast('Некорректный HTTP-метод');
+                return;
+            }
+            if (host) {
+                const hostname = host.startsWith('*.') ? host.slice(2) : host;
+                const labelPattern = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+                if ((host.includes('*') && !host.startsWith('*.'))
+                    || !new RegExp(`^${labelPattern}(?:\\.${labelPattern})*$`, 'i').test(hostname)) {
+                    showToast('Укажите хост как example.com или *.example.com');
+                    return;
+                }
+            }
+            if (urlPattern && matchType.value === 'regex') {
+                try { new RegExp(urlPattern); }
+                catch (error) {
+                    showToast('Некорректное регулярное выражение: ' + error.message);
+                    return;
+                }
+            }
+            const rules = loadIgnoreRules();
+            const rule = {
+                id: editingId || newRuleId(),
+                enabled: true,
+                urlPattern,
+                urlMatchType: matchType.value,
+                method,
+                host
+            };
+            const index = rules.findIndex(item => item.id === editingId);
+            if (index >= 0) rules[index] = rule;
+            else rules.push(rule);
+            if (!saveIgnoreRules(rules)) return;
+            resetForm();
+            renderRules();
+            showToast('Правило сохранено для последующих логов');
+        }
+
+        function describeRule(rule) {
+            const parts = [];
+            if (rule.urlPattern) parts.push(`${rule.urlMatchType || 'substring'}: ${rule.urlPattern}`);
+            if (rule.method && rule.method !== 'ANY') parts.push('Метод: ' + rule.method);
+            if (rule.host) parts.push('Хост: ' + rule.host);
+            return parts.join(' · ') || 'Пустое правило';
+        }
+
+        function renderRules() {
+            listWrap.innerHTML = '';
+            const rules = loadIgnoreRules();
+            if (!rules.length) {
+                const empty = document.createElement('div');
+                empty.className = 'nl-excl-empty';
+                empty.textContent = 'Правил игнорирования пока нет.';
+                listWrap.appendChild(empty);
+                return;
+            }
+            rules.forEach(rule => {
+                const item = document.createElement('div');
+                item.className = 'nl-excl-item';
+                const enabled = document.createElement('input');
+                enabled.type = 'checkbox';
+                enabled.className = 'nl-rule-enabled';
+                enabled.checked = !!rule.enabled;
+                enabled.title = 'Включить или выключить правило';
+                enabled.addEventListener('change', () => {
+                    const updated = loadIgnoreRules();
+                    const target = updated.find(candidate => candidate.id === rule.id);
+                    if (!target) return;
+                    target.enabled = enabled.checked;
+                    if (!saveIgnoreRules(updated)) enabled.checked = !enabled.checked;
+                });
+                item.appendChild(enabled);
+                const summary = document.createElement('span');
+                summary.className = 'nl-excl-host';
+                summary.textContent = describeRule(rule);
+                item.appendChild(summary);
+                item.appendChild(makeButton({
+                    text: 'Изменить',
+                    iconName: 'edit',
+                    size: 'sm',
+                    onClick: () => {
+                        editingId = rule.id;
+                        urlInput.value = rule.urlPattern || '';
+                        matchType.value = rule.urlMatchType || 'substring';
+                        methodInput.value = rule.method || 'ANY';
+                        hostInput.value = rule.host || '';
+                        saveButton.querySelector('span').textContent = 'Сохранить';
+                        cancelButton.style.display = '';
+                        urlInput.focus();
+                    }
+                }));
+                item.appendChild(makeButton({
+                    text: '',
+                    iconName: 'trash',
+                    variant: 'danger',
+                    size: 'sm',
+                    onClick: () => {
+                        const updated = loadIgnoreRules().filter(candidate => candidate.id !== rule.id);
+                        if (!saveIgnoreRules(updated)) return;
+                        if (editingId === rule.id) resetForm();
+                        renderRules();
+                        showToast('Правило удалено');
+                    }
+                }));
+                listWrap.appendChild(item);
+            });
+        }
+
+        renderRules();
+    }
+
     function buildAboutPanel(root) {
         buildSettingsHeader(root, {
             title: 'Об инструменте',
@@ -2858,7 +4371,7 @@
             <div class="nl-about-row"><span class="nl-about-k">Версия:</span><span class="nl-about-v">${escapeHtml(SCRIPT_VERSION)}</span></div>
             <div class="nl-about-row"><span class="nl-about-k">Автор:</span><span class="nl-about-v">Arame</span></div>
             <div class="nl-about-row"><span class="nl-about-k">Описание:</span><span class="nl-about-v">Перехват, просмотр и подмена fetch/XHR</span></div>
-            <div class="nl-about-row"><span class="nl-about-k">Хранилище:</span><span class="nl-about-v">localStorage</span></div>
+            <div class="nl-about-row"><span class="nl-about-k">Хранилище:</span><span class="nl-about-v">Настройки — localStorage; логи при включённом сохранении — sessionStorage</span></div>
             <div class="nl-about-row"><span class="nl-about-k">Репозиторий:</span><span class="nl-about-v"><a href="https://github.com/${escapeHtml(UPDATE_REPO.user)}/${escapeHtml(UPDATE_REPO.repo)}" target="_blank" rel="noopener" style="color:var(--nl-accent);">${escapeHtml(UPDATE_REPO.user)}/${escapeHtml(UPDATE_REPO.repo)}</a></span></div>
         `;
         infoCard.appendChild(info);
@@ -2884,10 +4397,15 @@
             onClick: () => {
                 if (!confirm('Сбросить все настройки API Tools?')) return;
                 [EXCLUDE_KEY, THEME_KEY, MAXBODY_KEY, MAXLOGS_KEY, CONSOLE_KEY,
-                 RULES_KEY, APPLY_KEY, COMPACT_KEY, BADGES_KEY, AUTOSCROLL_KEY,
-                 PRETTY_KEY, SLOW_KEY, DEBUG_KEY, AUTO_OPEN_KEY, SHOW_ERRORS_KEY, UPDATE_CACHE_KEY].forEach(k => {
+                 RULES_KEY, IGNORE_RULES_KEY, APPLY_KEY, COMPACT_KEY, BADGES_KEY, AUTOSCROLL_KEY,
+                 PRETTY_KEY, SLOW_KEY, DEBUG_KEY, AUTO_OPEN_KEY, SHOW_ERRORS_KEY,
+                 FAB_POSITION_KEY, UPDATE_CACHE_KEY, LOG_LIMIT_ENABLED_KEY,
+                 LOG_PERSISTENCE_KEY, LOG_PERSISTENCE_MB_KEY, LOG_MAX_AGE_ENABLED_KEY,
+                 LOG_MAX_AGE_MINUTES_KEY, LOG_MAX_SIZE_ENABLED_KEY, LOG_MAX_SIZE_MB_KEY,
+                 LOG_IO_ENABLED_KEY, LOG_IMPORT_MAX_MB_KEY].forEach(k => {
                     try { localStorage.removeItem(k); } catch (_) {}
                 });
+                clearPersistedLogs();
                 _rulesCache = null;
                 location.reload();
             }
@@ -2920,7 +4438,8 @@
             let activeId = null;
 
             const tabsList = [
-                { id: 'rules', label: 'Правила', icon: 'zap', build: (r) => buildRulesPanel(r) },
+                { id: 'rules', label: 'Правила подмены', icon: 'zap', build: (r) => buildRulesPanel(r) },
+                { id: 'ignore-rules', label: 'Правила логирования', icon: 'ban', build: (r) => buildIgnoreRulesPanel(r) },
                 { id: 'exclusions', label: 'Исключения', icon: 'ban', build: (r) => buildExclusionsPanel(r) },
                 { id: 'appearance', label: 'Внешний вид', icon: 'palette', build: (r) => buildAppearancePanel(r) },
                 { id: 'capture', label: 'Захват', icon: 'activity', build: (r) => buildCapturePanel(r) },
@@ -2989,11 +4508,138 @@
     function createViewer() {
         let overlay = null;
         let searchInput = null;
+        let regexInput = null;
         let body = null;
+        let filterBar = null;
+        let sourceSelect = null;
+        let methodSelect = null;
+        let hostSelect = null;
+        let sortSelect = null;
+        let groupSelect = null;
+        let slowInput = null;
+        let searchError = null;
+        let compareButton = null;
         let currentFilter = '';
+        let regexSearch = false;
+        let onlySlow = false;
+        let sortMode = 'time-desc';
+        let groupMode = 'none';
         let showOnlyErrors = loadShowErrorsOnly();
         const openRows = new Set();
         const revealedAuth = new Set();
+        const selectedForDiff = new Set();
+
+        function refreshCompareButton() {
+            if (!compareButton) return;
+            const label = compareButton.querySelector('span');
+            if (label) label.textContent = `Сравнить (${selectedForDiff.size}/2)`;
+            compareButton.disabled = selectedForDiff.size !== 2;
+        }
+
+        function recordHost(record) {
+            try { return new URL(String(record.url || ''), location.href).hostname.toLowerCase(); } catch (_) { return ''; }
+        }
+
+        function updateOptions(select, options, fallback) {
+            if (!select) return;
+            const selected = select.value || 'all';
+            select.innerHTML = '';
+            const allOption = document.createElement('option');
+            allOption.value = 'all';
+            allOption.textContent = fallback;
+            select.appendChild(allOption);
+            options.forEach(([value, label]) => {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = label;
+                select.appendChild(option);
+            });
+            if (selected !== 'all' && !options.some(([value]) => value === selected)) {
+                const option = document.createElement('option');
+                option.value = selected;
+                option.textContent = selected;
+                select.appendChild(option);
+            }
+            select.value = selected;
+        }
+
+        function matchesSearch(record, matcher, query) {
+            if (!query) return true;
+            const haystack = [
+                record.url, record.method, record.status,
+                formatResponse(record.response),
+                formatBody(record.requestBody),
+                (record.requestHeaders || []).map(([name, value]) => name + ':' + value).join('\n'),
+                (record.responseHeaders || []).map(([name, value]) => name + ':' + value).join('\n'),
+                (record.appliedRules || []).map(rule => rule.match).join('\n')
+            ].join('\n');
+            return matcher ? matcher.test(haystack) : haystack.toLowerCase().includes(query.toLowerCase());
+        }
+
+        function compareRecords(a, b, mode) {
+            const [field, direction] = mode.split('-');
+            const multiplier = direction === 'asc' ? 1 : -1;
+            const valueFor = record => {
+                if (field === 'time') {
+                    const value = Date.parse(record.time || '');
+                    return Number.isFinite(value) ? value : null;
+                }
+                if (field === 'status') return Number.isFinite(Number(record.status)) && record.status !== null && record.status !== '' ? Number(record.status) : null;
+                if (field === 'duration') return record.duration != null && record.duration !== '' && Number.isFinite(Number(record.duration)) ? Number(record.duration) : null;
+                return Number(record.requestSize || 0) + Number(record.responseSize || 0);
+            };
+            const first = valueFor(a);
+            const second = valueFor(b);
+            if (first === null) return second === null ? 0 : 1;
+            if (second === null) return -1;
+            return (first - second) * multiplier;
+        }
+
+        function groupLabel(record) {
+            if (groupMode === 'host') return recordHost(record) || 'Неизвестный домен';
+            if (groupMode === 'method') return String(record.method || 'GET').toUpperCase();
+            try {
+                const endpoint = new URL(String(record.url || ''), location.href);
+                return endpoint.origin + endpoint.pathname;
+            } catch (_) {
+                return String(record.url || '').split(/[?#]/)[0] || 'Неизвестный endpoint';
+            }
+        }
+
+        function highlightSearchMatches() {
+            const query = currentFilter.trim();
+            if (!query || !body) return;
+            const source = regexSearch ? query : query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            let matcher;
+            try { matcher = new RegExp(source, 'gi'); } catch (_) { return; }
+            body.querySelectorAll('.nl-search-highlight-target').forEach(element => {
+                const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+                const nodes = [];
+                while (walker.nextNode()) nodes.push(walker.currentNode);
+                nodes.forEach(node => {
+                    matcher.lastIndex = 0;
+                    const text = node.nodeValue;
+                    let match;
+                    let lastIndex = 0;
+                    let changed = false;
+                    const fragment = document.createDocumentFragment();
+                    while ((match = matcher.exec(text)) !== null) {
+                        changed = true;
+                        if (match.index > lastIndex) fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+                        const mark = document.createElement('mark');
+                        mark.className = 'nl-search-match';
+                        mark.textContent = match[0];
+                        fragment.appendChild(mark);
+                        lastIndex = match.index + match[0].length;
+                        if (match[0].length === 0) matcher.lastIndex++;
+                    }
+                    if (changed) {
+                        if (lastIndex < text.length) fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+                        node.parentNode.replaceChild(fragment, node);
+                    }
+                });
+            });
+        }
 
         function setShowErrorsOnly(next) {
             const value = !!next;
@@ -3006,22 +4652,53 @@
             if (!body) return;
             const prevScrollTop = body.scrollTop;
             const wasAtBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 50;
+            selectedForDiff.forEach(record => {
+                if (!logs.includes(record)) selectedForDiff.delete(record);
+            });
+            refreshCompareButton();
 
-            const q = currentFilter.trim().toLowerCase();
-            const baseLogs = showOnlyErrors ? logs.filter(r => !!r.error || (typeof r.status === 'number' && r.status >= 400)) : logs;
-            const filtered = q
-                ? baseLogs.filter(r => {
-                    const hay = [
-                        r.url, r.method, r.status,
-                        formatResponse(r.response),
-                        formatBody(r.requestBody),
-                        (r.requestHeaders || []).map(([n, v]) => n + ':' + v).join('\n'),
-                        (r.responseHeaders || []).map(([n, v]) => n + ':' + v).join('\n'),
-                        (r.appliedRules || []).map(a => a.match).join('\n')
-                    ].join('\n').toLowerCase();
-                    return hay.includes(q);
-                })
-                : baseLogs;
+            const q = currentFilter.trim();
+            let matcher = null;
+            if (regexSearch && q) {
+                try {
+                    matcher = new RegExp(q, 'i');
+                    if (searchError) searchError.textContent = '';
+                } catch (error) {
+                    if (searchError) searchError.textContent = 'Некорректное регулярное выражение: ' + error.message;
+                }
+            } else if (searchError) {
+                searchError.textContent = '';
+            }
+            const method = methodSelect ? methodSelect.value : 'all';
+            const host = hostSelect ? hostSelect.value : 'all';
+            const source = sourceSelect ? sourceSelect.value : 'all';
+            const allHosts = [...new Set(logs.map(recordHost).filter(Boolean))].sort();
+            updateOptions(methodSelect, [...new Set(logs.map(record => String(record.method || 'GET').toUpperCase()))].sort().map(value => [value, value]), 'Все методы');
+            updateOptions(hostSelect, [
+                ['@current', 'Текущий домен (' + location.hostname + ')'],
+                ...allHosts.filter(value => value !== location.hostname.toLowerCase()).map(value => [value, value])
+            ], 'Все домены');
+            if (sourceSelect) sourceSelect.value = source;
+            if (methodSelect) methodSelect.value = method;
+            if (hostSelect) hostSelect.value = host;
+            const isError = record => !!record.error || (typeof record.status === 'number' && record.status >= 400);
+            const isSlowRecord = record => record.duration != null && record.duration > loadSlowThreshold();
+            const regular = logs.filter(record => !pinnedLogs.has(record)).filter(record => {
+                if (showOnlyErrors && !isError(record)) return false;
+                if (onlySlow && !isSlowRecord(record)) return false;
+                if (source !== 'all' && record.source !== source) return false;
+                if (method !== 'all' && String(record.method || 'GET').toUpperCase() !== method) return false;
+                const recordDomain = recordHost(record);
+                if (host === '@current' && recordDomain !== location.hostname.toLowerCase()) return false;
+                if (host !== 'all' && host !== '@current' && recordDomain !== host) return false;
+                return matchesSearch(record, matcher, q) && (!regexSearch || !q || matcher !== null);
+            });
+            const pinned = logs.filter(record => pinnedLogs.has(record));
+            const recordIndexes = new Map(logs.map((record, index) => [record, index]));
+            const filtered = [...pinned, ...regular].sort((a, b) => {
+                if (pinnedLogs.has(a) !== pinnedLogs.has(b)) return pinnedLogs.has(a) ? -1 : 1;
+                return compareRecords(a, b, sortMode) || recordIndexes.get(a) - recordIndexes.get(b);
+            });
 
             if (!filtered.length) {
                 body.innerHTML = `<div class="nl-empty">${
@@ -3034,11 +4711,12 @@
             const showBadges = loadShowBadges();
             const slowMs = loadSlowThreshold();
 
-            const html = filtered.map((r) => {
+            const renderRecord = (r) => {
                 const key = getRowKey(r);
                 const isOpen = openRows.has(key);
-                const idxDisplay = logs.indexOf(r) + 1;
+                const idxDisplay = recordIndexes.get(r) + 1;
                 const idxParam = idxDisplay - 1;
+                const isPinned = pinnedLogs.has(r);
                 const statusClass = r.status >= 400 || r.error ? 'err' : (r.status ? 'ok' : '');
                 const statusText = r.error ? 'ERR' : (r.status || '-');
                 const isSlow = r.duration != null && r.duration > slowMs;
@@ -3046,7 +4724,7 @@
                 const applyReveal = (pairs) => {
                     if (!Array.isArray(pairs)) return pairs;
                     return pairs.map(([n, v]) => {
-                        if (isAuthorizationHeader(n) && revealedAuth.has(key + '::' + n + '::' + v)) {
+                        if (isSensitiveHeader(n) && revealedAuth.has(key + '::' + n + '::' + v)) {
                             return [n, v, 'revealed'];
                         }
                         return [n, v];
@@ -3057,6 +4735,11 @@
                 const resHeadersHtml = renderHeaders(applyReveal(r.responseHeaders), 'нет заголовков ответа');
                 const hasBody = r.requestBody !== null && r.requestBody !== undefined;
                 const hasRules = r.appliedRules && r.appliedRules.length;
+                const isHttpRequest = r.source === 'fetch' || r.source === 'xhr';
+                const contentType = r.responseContentType || r.requestContentType || r.contentType;
+                const contentTypeInfo = getContentTypeInfo(contentType);
+                const requestCookies = (r.requestHeaders || []).filter(([name]) => isCookieHeader(name));
+                const responseCookies = (r.responseHeaders || []).filter(([name]) => isCookieHeader(name));
 
                 const badges = [];
                 if (showBadges) {
@@ -3071,40 +4754,86 @@
 
                 const toolbar = `
                     <div class="nl-row-toolbar">
-                        <button type="button" class="nl-copy-btn" data-edit="${idxParam}">${ICONS.edit}<span>Редактировать запрос</span></button>
+                        <button type="button" class="nl-copy-btn" data-ignore="${idxParam}">${ICONS.ban}<span>Не логировать endpoint</span></button>
+                        ${isHttpRequest ? `<button type="button" class="nl-copy-btn" data-edit="${idxParam}">${ICONS.edit}<span>Редактировать запрос</span></button>` : ''}
+                        ${isHttpRequest ? `<button type="button" class="nl-copy-btn" data-replay="${idxParam}">${ICONS.zap}<span>Повторить</span></button>` : ''}
                         <button type="button" class="nl-copy-btn" data-copy="url" data-idx="${idxParam}">${ICONS.clipboard}<span>URL</span></button>
                         ${hasBody ? `<button type="button" class="nl-copy-btn" data-copy="body" data-idx="${idxParam}">${ICONS.clipboard}<span>Body</span></button>` : ''}
-                        <button type="button" class="nl-copy-btn" data-copy="curl" data-idx="${idxParam}">${ICONS.clipboard}<span>cURL</span></button>
-                        <button type="button" class="nl-copy-btn" data-copy="fetch" data-idx="${idxParam}">${ICONS.clipboard}<span>fetch</span></button>
-                        <button type="button" class="nl-copy-btn" data-copy="headers" data-idx="${idxParam}">${ICONS.clipboard}<span>Headers</span></button>
+                        ${isHttpRequest ? `<button type="button" class="nl-copy-btn" data-copy="curl" data-idx="${idxParam}">${ICONS.clipboard}<span>cURL</span></button>` : ''}
+                        ${isHttpRequest ? `<button type="button" class="nl-copy-btn" data-copy="fetch" data-idx="${idxParam}">${ICONS.clipboard}<span>fetch</span></button>` : ''}
+                        ${isHttpRequest ? `<button type="button" class="nl-copy-btn" data-copy="xhr" data-idx="${idxParam}">${ICONS.clipboard}<span>XMLHttpRequest</span></button>` : ''}
+                        ${isHttpRequest ? `<button type="button" class="nl-copy-btn" data-copy="headers" data-idx="${idxParam}">${ICONS.clipboard}<span>Headers</span></button>` : ''}
+                        ${loadBool(LOG_IO_ENABLED_KEY, false) ? `<button type="button" class="nl-copy-btn" data-export-json="${idxParam}">${ICONS.download}<span>JSON</span></button>` : ''}
                         <button type="button" class="nl-copy-btn" data-copy="all" data-idx="${idxParam}">${ICONS.clipboard}<span>Full</span></button>
                     </div>
                 `;
 
                 const details = [];
                 details.push(toolbar);
-                details.push(`<div class="nl-kv"><div class="nl-k">URL</div><div class="nl-v">${escapeHtml(r.url || '')}</div></div>`);
+                details.push(`<div class="nl-kv"><div class="nl-k">URL</div><div class="nl-v nl-search-highlight-target">${escapeHtml(r.url || '')}</div></div>`);
                 if (r.time) details.push(`<div class="nl-kv"><div class="nl-k">Time</div><div class="nl-v">${escapeHtml(r.time)}${r.duration != null ? ' (' + r.duration.toFixed(0) + ' ms)' : ''}</div></div>`);
+                if (r.queryParams && r.queryParams.length) {
+                    details.push(`<div class="nl-kv"><div class="nl-k">Query</div>${renderHeaders(r.queryParams, 'нет query-параметров')}</div>`);
+                }
+                if (r.requestSize != null || r.responseSize != null) {
+                    const requestSize = r.requestSize == null
+                        ? 'н/д'
+                        : formatByteSize(r.requestSize) + (r.requestSizeSource ? ` (${r.requestSizeSource})` : '');
+                    const responseSize = r.responseSize == null
+                        ? 'н/д'
+                        : formatByteSize(r.responseSize) + (r.responseSizeSource ? ` (${r.responseSizeSource})` : '');
+                    details.push(`<div class="nl-kv"><div class="nl-k">Размер</div><div class="nl-v">Request: ${escapeHtml(requestSize)} · Response: ${escapeHtml(responseSize)}</div></div>`);
+                }
+                if (r.dispatchDuration != null) {
+                    details.push(`<div class="nl-kv"><div class="nl-k">API dispatch</div><div class="nl-v">${r.dispatchDuration.toFixed(2)} ms</div></div>`);
+                }
+                if (r.requestContentType || r.responseContentType) {
+                    const requestType = r.requestContentType
+                        ? `${getContentTypeInfo(r.requestContentType).icon} ${escapeHtml(r.requestContentType)}`
+                        : 'нет';
+                    const responseType = r.responseContentType
+                        ? `${getContentTypeInfo(r.responseContentType).icon} ${escapeHtml(r.responseContentType)}`
+                        : 'нет';
+                    details.push(`<div class="nl-kv"><div class="nl-k">Content-Type</div><div class="nl-v">Request: ${requestType}\nResponse: ${responseType}</div></div>`);
+                }
                 if (r.error) details.push(`<div class="nl-kv"><div class="nl-k">Error</div><div class="nl-v">${escapeHtml(r.error)}</div></div>`);
+                if (r.eventName || r.lastEventId) {
+                    details.push(`<div class="nl-kv"><div class="nl-k">Event</div><div class="nl-v">${escapeHtml(r.eventName || '')}${r.lastEventId ? '\nLast-Event-ID: ' + escapeHtml(r.lastEventId) : ''}</div></div>`);
+                }
+                if (r.beaconQueued !== undefined) {
+                    details.push(`<div class="nl-kv"><div class="nl-k">Beacon</div><div class="nl-v">${r.beaconQueued ? 'Принят браузером в очередь' : 'Отклонён браузером'}</div></div>`);
+                }
                 if (hasRules) {
                     const ruleList = r.appliedRules.map(a => `${escapeHtml(a.method || 'ANY')} ${escapeHtml(a.match || '?')}${a.mocked ? ' (mock)' : ''}`).join('\n');
                     details.push(`<div class="nl-kv"><div class="nl-k">Applied rules</div><div class="nl-v">${ruleList}</div></div>`);
                 }
                 details.push(`<div class="nl-kv"><div class="nl-k">Request headers</div>${reqHeadersHtml}</div>`);
-                if (hasBody) details.push(`<div class="nl-kv"><div class="nl-k">Request body</div><div class="nl-v">${formatBodyHtml(r.requestBody)}</div></div>`);
+                if (requestCookies.length) {
+                    details.push(`<div class="nl-kv"><div class="nl-k">Request cookies</div>${renderHeaders(applyReveal(requestCookies), 'нет')}</div>`);
+                }
+                if (hasBody) details.push(`<div class="nl-kv"><div class="nl-k">Request body</div><div class="nl-v nl-search-highlight-target">${formatBodyHtml(r.requestBody)}</div></div>`);
                 details.push(`<div class="nl-kv"><div class="nl-k">Response headers</div>${resHeadersHtml}</div>`);
-                if (r.response !== null && r.response !== undefined) {
-                    details.push(`<div class="nl-kv"><div class="nl-k">Response body</div><div class="nl-v">${formatResponseHtml(r.response)}</div></div>`);
+                if (responseCookies.length) {
+                    details.push(`<div class="nl-kv"><div class="nl-k">Response cookies</div>${renderHeaders(applyReveal(responseCookies), 'нет')}</div>`);
+                }
+                if (r.responsePresent || (r.response !== null && r.response !== undefined)) {
+                    details.push(`<div class="nl-kv"><div class="nl-k">Response body</div><div class="nl-v nl-search-highlight-target">${formatResponseHtml(r.response)}</div></div>`);
+                }
+                if (r.initiator) {
+                    details.push(`<div class="nl-kv"><div class="nl-k">Initiator</div><div class="nl-v">${escapeHtml(r.initiator)}</div></div>`);
                 }
 
                 return `
-                    <div class="nl-row${isOpen ? ' open' : ''}" data-key="${key}" data-idx="${idxParam}">
+                    <div class="nl-row${isOpen ? ' open' : ''}${selectedForDiff.has(r) ? ' compare-selected' : ''}" data-key="${key}" data-idx="${idxParam}">
                         <div class="nl-row-head">
+                            <button type="button" class="nl-pin-btn${isPinned ? ' pinned' : ''}" data-pin="${idxParam}" aria-label="${isPinned ? 'Открепить запрос' : 'Закрепить запрос'}" aria-pressed="${isPinned}" title="${isPinned ? 'Открепить запрос' : 'Закрепить запрос'}">${isPinned ? ICONS.starFilled : ICONS.star}</button>
+                            <input type="checkbox" class="nl-compare-select" data-compare="${idxParam}" aria-label="Выбрать запрос для сравнения" title="Выбрать для сравнения" ${selectedForDiff.has(r) ? 'checked' : ''}>
                             <span class="nl-method" data-m="${escapeHtml(r.method || 'GET')}">${escapeHtml(r.method || 'GET')}</span>
                             <span class="nl-status ${statusClass}">${escapeHtml(String(statusText))}</span>
                             ${badges.join('')}
-                            <span class="nl-url" title="${escapeHtml(r.url || '')}">${escapeHtml(r.url || '')}</span>
+                            <span class="nl-url nl-search-highlight-target" title="${escapeHtml(r.url || '')}">${escapeHtml(r.url || '')}</span>
                             <span class="nl-src">${escapeHtml(r.source || '?')}</span>
+                            ${contentType ? `<span class="nl-content-type" title="${escapeHtml(contentType)}">${contentTypeInfo.icon}${contentTypeInfo.label}</span>` : ''}
                             <span class="nl-badge-time${isSlow ? ' slow' : ''}">${timeText}</span>
                             <span class="nl-chev">${ICONS.chevronRight}</span>
                         </div>
@@ -3113,12 +4842,32 @@
                         </div>
                     </div>
                 `;
-            }).join('');
+            };
+
+            const renderRecords = records => {
+                if (groupMode === 'none') return records.map(renderRecord).join('');
+                const groups = new Map();
+                records.forEach(record => {
+                    const label = groupLabel(record);
+                    if (!groups.has(label)) groups.set(label, []);
+                    groups.get(label).push(record);
+                });
+                return [...groups.entries()].map(([label, groupRecords]) =>
+                    `<div class="nl-group-heading">${escapeHtml(label)} · ${groupRecords.length}</div>${groupRecords.map(renderRecord).join('')}`
+                ).join('');
+            };
+
+            const pinnedRows = filtered.filter(record => pinnedLogs.has(record));
+            const regularRows = filtered.filter(record => !pinnedLogs.has(record));
+            const html = (pinnedRows.length
+                ? `<div class="nl-pinned-heading">Закреплённые · ${pinnedRows.length}</div>${renderRecords(pinnedRows)}`
+                : '') + renderRecords(regularRows);
 
             body.innerHTML = html;
             if (compact) body.classList.add('nl-compact');
             else body.classList.remove('nl-compact');
             hydrateAuthEyes(body);
+            highlightSearchMatches();
 
             if (loadAutoScroll() && wasAtBottom) {
                 body.scrollTop = body.scrollHeight;
@@ -3129,12 +4878,12 @@
 
         function hydrateAuthEyes(root) {
             if (!root) return;
-            root.querySelectorAll('.nl-header-auth .nl-eye').forEach(btn => {
+            root.querySelectorAll('.nl-header-sensitive .nl-eye').forEach(btn => {
                 if (btn.dataset.hydrated === '1') return;
                 btn.dataset.hydrated = '1';
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    const row = btn.closest('.nl-header-auth');
+                    const row = btn.closest('.nl-header-sensitive');
                     if (!row) return;
                     const outer = btn.closest('.nl-row');
                     const key = outer ? outer.dataset.key : null;
@@ -3171,6 +4920,7 @@
                 else if (action === 'body') text = bodyToString(r);
                 else if (action === 'curl') text = buildCurl(r);
                 else if (action === 'fetch') text = buildFetch(r);
+                else if (action === 'xhr') text = buildXhr(r);
                 else if (action === 'headers') text = headersToReport(r.requestHeaders);
                 else if (action === 'all') text = buildFull(r);
             } catch (err) {
@@ -3353,6 +5103,197 @@
             document.body.appendChild(editorOverlay);
         }
 
+        function openReplayRequest(record) {
+            const replayOverlay = buildOverlay();
+            const built = buildModal({
+                titleIcon: 'zap',
+                titleText: 'Повтор запроса',
+                titleAccent: record.method || 'GET'
+            });
+            const { modal, closeBtn } = built;
+            const replayBody = document.createElement('div');
+            replayBody.className = 'nl-modal-body';
+            const form = document.createElement('div');
+            form.style.display = 'flex';
+            form.style.flexDirection = 'column';
+            form.style.gap = '12px';
+            const warning = document.createElement('div');
+            warning.className = 'nl-settings-desc';
+            warning.textContent = 'Запрос будет отправлен только на origin текущей страницы. Повтор может повторно выполнить действие на сервере.';
+            form.appendChild(warning);
+
+            const urlInput = document.createElement('input');
+            urlInput.className = 'nl-rule-input';
+            urlInput.value = getFullUrl(record);
+            const urlField = makeField({ label: 'URL' });
+            urlField.inline.appendChild(urlInput);
+            form.appendChild(urlField);
+
+            const headersInput = document.createElement('textarea');
+            headersInput.className = 'nl-rule-textarea';
+            headersInput.value = (record.requestHeaders || []).map(([name, value]) => `${name}: ${value}`).join('\n');
+            const headersField = makeField({ label: 'Заголовки', hint: 'Один заголовок на строку: Name: value' });
+            headersField.inline.appendChild(headersInput);
+            form.appendChild(headersField);
+
+            const bodyInput = document.createElement('textarea');
+            bodyInput.className = 'nl-rule-textarea';
+            bodyInput.value = formatBody(record.requestBody);
+            const bodyField = makeField({
+                label: 'Тело запроса',
+                hint: record.requestBody && record.requestBody.__type === 'FormData'
+                    ? 'FormData и файлы показаны как текст; при необходимости восстановите их вручную.'
+                    : 'Пустое поле отправляется без тела.'
+            });
+            bodyField.inline.appendChild(bodyInput);
+            form.appendChild(bodyField);
+
+            const actions = document.createElement('div');
+            actions.className = 'nl-rule-actions';
+            const closeReplay = () => {
+                document.removeEventListener('keydown', onReplayKey, true);
+                replayOverlay.remove();
+            };
+            const onReplayKey = event => {
+                if (event.key === 'Escape') {
+                    event.stopImmediatePropagation();
+                    closeReplay();
+                }
+            };
+            const replayButton = makeButton({
+                text: 'Отправить повторно',
+                iconName: 'zap',
+                variant: 'primary',
+                size: 'sm',
+                onClick: async () => {
+                    let target;
+                    try {
+                        target = new URL(urlInput.value, location.href);
+                    } catch (_) {
+                        showToast('Укажите корректный URL');
+                        return;
+                    }
+                    if (target.origin !== location.origin) {
+                        showToast('Повтор разрешён только для текущего origin');
+                        return;
+                    }
+                    const lines = headersInput.value.split(/\r?\n/).filter(line => line.trim());
+                    if (lines.some(line => {
+                        const colon = line.indexOf(':');
+                        return colon <= 0 || !line.slice(0, colon).trim();
+                    })) {
+                        showToast('Проверьте формат заголовков: Name: value');
+                        return;
+                    }
+                    const headers = new Headers();
+                    try {
+                        lines.forEach(line => {
+                            const colon = line.indexOf(':');
+                            headers.append(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
+                        });
+                    } catch (error) {
+                        showToast('Некорректные заголовки: ' + error.message);
+                        return;
+                    }
+                    const method = String(record.method || 'GET').toUpperCase();
+                    const body = bodyInput.value;
+                    const canSendBody = !['GET', 'HEAD'].includes(method) && body !== '';
+                    if (!window.confirm(`Повторно отправить ${method} ${target.href}? Сервер может повторно выполнить это действие.`)) return;
+                    replayButton.disabled = true;
+                    try {
+                        const response = await window.fetch(target.href, {
+                            method,
+                            headers,
+                            body: canSendBody ? body : undefined,
+                            credentials: 'same-origin',
+                            redirect: 'manual'
+                        });
+                        showToast(`Повтор выполнен: HTTP ${response.status}`);
+                    } catch (error) {
+                        showToast('Не удалось повторить запрос: ' + String(error));
+                    } finally {
+                        replayButton.disabled = false;
+                    }
+                }
+            });
+            actions.appendChild(replayButton);
+            actions.appendChild(makeButton({ text: 'Отмена', size: 'sm', onClick: closeReplay }));
+            form.appendChild(actions);
+            replayBody.appendChild(form);
+            modal.appendChild(replayBody);
+            replayOverlay.appendChild(modal);
+            replayOverlay.addEventListener('click', event => {
+                if (event.target === replayOverlay) closeReplay();
+            });
+            closeBtn.addEventListener('click', closeReplay);
+            document.addEventListener('keydown', onReplayKey, true);
+            document.body.appendChild(replayOverlay);
+        }
+
+        function openDiff(first, second) {
+            const diffOverlay = buildOverlay();
+            const built = buildModal({ titleIcon: 'code', titleText: 'Сравнение запросов', titleAccent: 'diff' });
+            const { modal, closeBtn } = built;
+            const diffBody = document.createElement('div');
+            diffBody.className = 'nl-modal-body';
+            const sideBySide = (title, left, right) => {
+                const changed = left !== right;
+                return `<section class="nl-diff-section"><div class="nl-diff-title">${escapeHtml(title)}</div><div class="nl-diff-grid"><div class="nl-diff-side${changed ? ' changed' : ''}"><pre>${escapeHtml(left || '—')}</pre></div><div class="nl-diff-side${changed ? ' changed' : ''}"><pre>${escapeHtml(right || '—')}</pre></div></div></section>`;
+            };
+            const headerMap = pairs => {
+                const values = new Map();
+                (pairs || []).forEach(([name, value]) => {
+                    const key = String(name).toLowerCase();
+                    const safeValue = isSensitiveHeader(name) ? '[REDACTED]' : String(value);
+                    const current = values.get(key);
+                    values.set(key, {
+                        name: current ? current.name : String(name),
+                        value: current ? current.value + ', ' + safeValue : safeValue
+                    });
+                });
+                return values;
+            };
+            const headerDiff = (title, leftPairs, rightPairs) => {
+                const left = headerMap(leftPairs);
+                const right = headerMap(rightPairs);
+                const names = [...new Set([...left.keys(), ...right.keys()])].sort();
+                const rows = names.map(name => {
+                    const a = left.get(name);
+                    const b = right.get(name);
+                    const leftValue = a ? a.value : '—';
+                    const rightValue = b ? b.value : '—';
+                    return `<tr${leftValue !== rightValue ? ' class="changed"' : ''}><td>${escapeHtml((a || b).name)}</td><td>${escapeHtml(leftValue)}</td><td>${escapeHtml(rightValue)}</td></tr>`;
+                }).join('');
+                return `<section class="nl-diff-section"><div class="nl-diff-title">${escapeHtml(title)}</div><table class="nl-diff-table"><thead><tr><th>Заголовок</th><th>Запрос 1</th><th>Запрос 2</th></tr></thead><tbody>${rows || '<tr><td colspan="3">Нет заголовков</td></tr>'}</tbody></table></section>`;
+            };
+            const firstLabel = `${first.method || 'GET'} ${getFullUrl(first)}`;
+            const secondLabel = `${second.method || 'GET'} ${getFullUrl(second)}`;
+            diffBody.innerHTML = sideBySide('Запросы', firstLabel, secondLabel)
+                + sideBySide('Статус', String(first.status || '—'), String(second.status || '—'))
+                + headerDiff('Заголовки запроса', first.requestHeaders, second.requestHeaders)
+                + sideBySide('Тело запроса', formatBody(first.requestBody), formatBody(second.requestBody))
+                + headerDiff('Заголовки ответа', first.responseHeaders, second.responseHeaders)
+                + sideBySide('Тело ответа', formatResponse(first.response), formatResponse(second.response));
+            const closeDiff = () => {
+                document.removeEventListener('keydown', onDiffKey, true);
+                diffOverlay.remove();
+            };
+            const onDiffKey = event => {
+                if (event.key === 'Escape') {
+                    event.stopImmediatePropagation();
+                    closeDiff();
+                }
+            };
+            diffOverlay.addEventListener('click', event => {
+                if (event.target === diffOverlay) closeDiff();
+            });
+            closeBtn.addEventListener('click', closeDiff);
+            document.addEventListener('keydown', onDiffKey, true);
+            modal.appendChild(diffBody);
+            diffOverlay.appendChild(modal);
+            document.body.appendChild(diffOverlay);
+        }
+
         function open() {
             if (overlay) return;
             injectStyles();
@@ -3365,6 +5306,8 @@
             const { modal, tools, closeBtn } = built;
             closeBtn.addEventListener('click', close);
 
+            const searchWrap = document.createElement('div');
+            searchWrap.className = 'nl-search-wrap';
             searchInput = document.createElement('input');
             searchInput.className = 'nl-input nl-input--search';
             searchInput.type = 'search';
@@ -3374,8 +5317,88 @@
                 currentFilter = searchInput.value;
                 render();
             });
+            searchWrap.appendChild(searchInput);
+            const regexLabel = document.createElement('label');
+            regexLabel.className = 'nl-search-regex';
+            regexInput = document.createElement('input');
+            regexInput.type = 'checkbox';
+            regexInput.checked = regexSearch;
+            regexInput.addEventListener('change', () => {
+                regexSearch = regexInput.checked;
+                render();
+            });
+            regexLabel.appendChild(regexInput);
+            regexLabel.appendChild(document.createTextNode('Regex'));
+            searchWrap.appendChild(regexLabel);
+            tools.appendChild(searchWrap);
 
-            tools.appendChild(searchInput);
+            filterBar = document.createElement('div');
+            filterBar.className = 'nl-viewer-filters';
+            const createFilterSelect = (label, options, onChange) => {
+                const select = document.createElement('select');
+                select.className = 'nl-input nl-filter-select';
+                select.setAttribute('aria-label', label);
+                select.title = label;
+                options.forEach(([value, text]) => {
+                    const option = document.createElement('option');
+                    option.value = value;
+                    option.textContent = text;
+                    select.appendChild(option);
+                });
+                select.addEventListener('change', onChange);
+                filterBar.appendChild(select);
+                return select;
+            };
+            sourceSelect = createFilterSelect('Фильтр по типу запроса', [
+                ['all', 'Все типы'],
+                ['fetch', 'fetch'],
+                ['xhr', 'XHR'],
+                ['websocket', 'WebSocket'],
+                ['eventsource', 'EventSource'],
+                ['beacon', 'Beacon']
+            ], render);
+            methodSelect = createFilterSelect('Фильтр по методу', [['all', 'Все методы']], render);
+            hostSelect = createFilterSelect('Фильтр по домену', [['all', 'Все домены']], render);
+            const slowLabel = document.createElement('label');
+            slowLabel.className = 'nl-viewer-slow';
+            slowInput = document.createElement('input');
+            slowInput.type = 'checkbox';
+            slowInput.checked = onlySlow;
+            slowInput.addEventListener('change', () => {
+                onlySlow = slowInput.checked;
+                render();
+            });
+            slowLabel.appendChild(slowInput);
+            slowLabel.appendChild(document.createTextNode('Только медленные'));
+            filterBar.appendChild(slowLabel);
+            sortSelect = createFilterSelect('Сортировка запросов', [
+                ['time-desc', 'Время: новые'],
+                ['time-asc', 'Время: старые'],
+                ['status-asc', 'Статус: по возрастанию'],
+                ['status-desc', 'Статус: по убыванию'],
+                ['duration-desc', 'Длительность: больше'],
+                ['duration-asc', 'Длительность: меньше'],
+                ['size-desc', 'Размер: больше'],
+                ['size-asc', 'Размер: меньше']
+            ], () => {
+                sortMode = sortSelect.value;
+                render();
+            });
+            sortSelect.value = sortMode;
+            groupSelect = createFilterSelect('Группировка запросов', [
+                ['none', 'Без группировки'],
+                ['endpoint', 'По endpoint'],
+                ['host', 'По домену'],
+                ['method', 'По методу']
+            ], () => {
+                groupMode = groupSelect.value;
+                render();
+            });
+            groupSelect.value = groupMode;
+            searchError = document.createElement('div');
+            searchError.className = 'nl-search-error';
+            searchError.setAttribute('role', 'status');
+            filterBar.appendChild(searchError);
 
             const toggleErrorsBtn = makeButton({
                 text: showOnlyErrors ? 'Ошибки: on' : 'Ошибки', iconName: 'info', variant: showOnlyErrors ? 'danger' : '',
@@ -3388,6 +5411,15 @@
                 }
             });
             tools.appendChild(toggleErrorsBtn);
+
+            const pauseButton = makeButton({
+                text: window.__netLogger.paused ? 'Возобновить' : 'Пауза',
+                iconName: window.__netLogger.paused ? 'play' : 'pause',
+                onClick: () => setLoggingPaused(!window.__netLogger.paused)
+            });
+            pauseButton.dataset.netloggerPause = '1';
+            pauseButton.setAttribute('aria-pressed', window.__netLogger.paused ? 'true' : 'false');
+            tools.appendChild(pauseButton);
 
             tools.appendChild(makeButton({
                 text: 'Развернуть все запросы', iconName: 'chevronDown',
@@ -3412,6 +5444,18 @@
                 }
             }));
             tools.appendChild(makeButton({
+                text: 'HAR', iconName: 'download',
+                onClick: () => {
+                    if (!logs.length) { showToast('Пока пусто.'); return; }
+                    const harLogs = logs.filter(record => ['fetch', 'xhr', 'beacon'].includes(record.source));
+                    if (!harLogs.length) {
+                        showToast('В HAR включаются fetch, XHR и Beacon; WebSocket и EventSource не поддерживаются.');
+                        return;
+                    }
+                    downloadHar(harLogs);
+                }
+            }));
+            tools.appendChild(makeButton({
                 text: 'Копировать', iconName: 'clipboard', variant: 'success',
                 onClick: async () => {
                     if (!logs.length) { alert('Пока пусто.'); return; }
@@ -3419,19 +5463,90 @@
                     alert(ok ? ('Скопировано (' + logs.length + ' запросов).') : 'Не удалось скопировать автоматически.');
                 }
             }));
+            compareButton = makeButton({
+                text: `Сравнить (${selectedForDiff.size}/2)`,
+                iconName: 'code',
+                onClick: () => {
+                    if (selectedForDiff.size !== 2) {
+                        showToast('Выберите ровно два запроса');
+                        return;
+                    }
+                    const [first, second] = selectedForDiff;
+                    openDiff(first, second);
+                }
+            });
+            compareButton.disabled = selectedForDiff.size !== 2;
+            tools.appendChild(compareButton);
             tools.appendChild(makeButton({
                 text: 'Очистить', iconName: 'trash', variant: 'danger',
                 onClick: () => {
-                    logs.length = 0;
+                    clearLogs(true);
                     openRows.clear();
                     revealedAuth.clear();
                     render();
                 }
             }));
+            modal.appendChild(filterBar);
             body = document.createElement('div');
             body.className = 'nl-modal-body';
             body.addEventListener('click', async (e) => {
                 if (e.target.closest('.nl-eye')) return;
+                const pinBtn = e.target.closest('[data-pin]');
+                if (pinBtn) {
+                    e.stopPropagation();
+                    const record = logs[parseInt(pinBtn.dataset.pin, 10)];
+                    if (!record) return;
+                    if (pinnedLogs.has(record)) pinnedLogs.delete(record);
+                    else pinnedLogs.add(record);
+                    trimLogs();
+                    render();
+                    return;
+                }
+                const compareInput = e.target.closest('[data-compare]');
+                if (compareInput) {
+                    e.stopPropagation();
+                    const record = logs[parseInt(compareInput.dataset.compare, 10)];
+                    if (!record) return;
+                    if (compareInput.checked) {
+                        if (!selectedForDiff.has(record) && selectedForDiff.size >= 2) {
+                            compareInput.checked = false;
+                            showToast('Для сравнения можно выбрать только два запроса');
+                            return;
+                        }
+                        selectedForDiff.add(record);
+                    } else {
+                        selectedForDiff.delete(record);
+                    }
+                    render();
+                    return;
+                }
+                const ignoreBtn = e.target.closest('[data-ignore]');
+                if (ignoreBtn) {
+                    e.stopPropagation();
+                    const record = logs[parseInt(ignoreBtn.dataset.ignore, 10)];
+                    if (record) addIgnoreEndpointRule(record);
+                    return;
+                }
+                const replayBtn = e.target.closest('[data-replay]');
+                if (replayBtn) {
+                    e.stopPropagation();
+                    const record = logs[parseInt(replayBtn.dataset.replay, 10)];
+                    if (record) openReplayRequest(record);
+                    return;
+                }
+                const exportJsonBtn = e.target.closest('[data-export-json]');
+                if (exportJsonBtn) {
+                    e.stopPropagation();
+                    const index = parseInt(exportJsonBtn.dataset.exportJson, 10);
+                    const record = logs[index];
+                    if (!record) {
+                        showToast('Запись не найдена');
+                        return;
+                    }
+                    const filename = `api-tools-request-${index + 1}.json`;
+                    downloadJsonFile(filename, recordForJsonExport(record));
+                    return;
+                }
                 const editBtn = e.target.closest('[data-edit]');
                 if (editBtn) {
                     e.stopPropagation();
@@ -3480,6 +5595,16 @@
             overlay = null;
             body = null;
             searchInput = null;
+            regexInput = null;
+            filterBar = null;
+            sourceSelect = null;
+            methodSelect = null;
+            hostSelect = null;
+            sortSelect = null;
+            groupSelect = null;
+            slowInput = null;
+            searchError = null;
+            compareButton = null;
         }
 
         return { open, close, refresh: render, setShowErrorsOnly, isOpen: () => !!overlay };
@@ -3489,6 +5614,7 @@
         injectStyles();
         const box = document.createElement('div');
         box.id = '__netLoggerUI';
+        box.dataset.position = loadFabPosition();
         applyTheme(box);
         const actions = document.createElement('div');
         actions.className = 'nl-actions';
@@ -3520,9 +5646,17 @@
             text: 'Настройки', iconName: 'settings',
             onClick: () => settings.open()
         }));
+        const pauseButton = makeButton({
+            text: window.__netLogger.paused ? 'Возобновить' : 'Пауза',
+            iconName: window.__netLogger.paused ? 'play' : 'pause',
+            onClick: () => setLoggingPaused(!window.__netLogger.paused)
+        });
+        pauseButton.dataset.netloggerPause = '1';
+        pauseButton.setAttribute('aria-pressed', window.__netLogger.paused ? 'true' : 'false');
+        actions.appendChild(pauseButton);
         actions.appendChild(makeButton({
             text: 'Очистить', iconName: 'trash', variant: 'danger',
-            onClick: () => { logs.length = 0; }
+            onClick: () => clearLogs(false)
         }));
         box.appendChild(actions);
 
@@ -3544,6 +5678,10 @@
         fabChev.innerHTML = ICONS.chevronDown;
         fab.appendChild(fabChev);
         box.appendChild(fab);
+        const setPosition = (position) => {
+            const allowed = ['bottom-right', 'bottom-left', 'top-right', 'top-left'];
+            box.dataset.position = allowed.includes(position) ? position : 'bottom-right';
+        };
 
         let open = false;
         function setOpen(v) {
@@ -3563,6 +5701,7 @@
         const refreshCounter = () => { fabCount.textContent = String(logs.length); };
         setInterval(refreshCounter, 500);
         refreshCounter();
+        window.__netLoggerUI.setPosition = setPosition;
         window.__netLoggerBar = { refresh: refreshCounter };
         document.body.appendChild(box);
 
