@@ -4371,7 +4371,7 @@
             <div class="nl-about-row"><span class="nl-about-k">Версия:</span><span class="nl-about-v">${escapeHtml(SCRIPT_VERSION)}</span></div>
             <div class="nl-about-row"><span class="nl-about-k">Автор:</span><span class="nl-about-v">Arame</span></div>
             <div class="nl-about-row"><span class="nl-about-k">Описание:</span><span class="nl-about-v">Перехват, просмотр и подмена fetch/XHR</span></div>
-            <div class="nl-about-row"><span class="nl-about-k">Хранилище:</span><span class="nl-about-v">Настройки — localStorage; логи при включённом сохранении — sessionStorage</span></div>
+            <div class="nl-about-row"><span class="nl-about-k">Хранилище:</span><span class="nl-about-v">localStorage</span></div>
             <div class="nl-about-row"><span class="nl-about-k">Репозиторий:</span><span class="nl-about-v"><a href="https://github.com/${escapeHtml(UPDATE_REPO.user)}/${escapeHtml(UPDATE_REPO.repo)}" target="_blank" rel="noopener" style="color:var(--nl-accent);">${escapeHtml(UPDATE_REPO.user)}/${escapeHtml(UPDATE_REPO.repo)}</a></span></div>
         `;
         infoCard.appendChild(info);
@@ -4379,12 +4379,6 @@
 
         buildUpdateSection(root);
 
-        const hotkeysCard = makeCard('Горячие клавиши', 'settings');
-        const hotkeys = document.createElement('div');
-        hotkeys.className = 'nl-about-list';
-        hotkeys.innerHTML = `<div class="nl-about-row"><span class="nl-about-k">Esc:</span><span class="nl-about-v">Закрыть модальное окно</span></div>`;
-        hotkeysCard.appendChild(hotkeys);
-        root.appendChild(hotkeysCard);
 
         const resetCard = makeCard('Сброс', 'power');
         const resetHint = document.createElement('div');
